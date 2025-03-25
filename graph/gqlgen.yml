@@ -1,0 +1,37 @@
+schema:
+  - schema.graphqls
+
+exec:
+  filename: generated/generated.go
+  package: generated
+
+model:
+  filename: model/models_gen.go
+  package: model
+
+resolver:
+  layout: follow-schema
+  dir: .
+  package: graph
+  filename_template: "{name}.resolvers.go"
+
+autobind:
+ - "crm-communication-api/internal/model"
+
+models:
+  ID:
+    model:
+      - github.com/99designs/gqlgen/graphql.ID
+      - github.com/99designs/gqlgen/graphql.Int
+      - github.com/99designs/gqlgen/graphql.Int64
+      - github.com/99designs/gqlgen/graphql.Int32
+  Int:
+    model:
+      - github.com/99designs/gqlgen/graphql.Int
+      - github.com/99designs/gqlgen/graphql.Int64
+      - github.com/99designs/gqlgen/graphql.Int32
+  # Add mapping for Time scalar (very important)
+  Time:
+    model: "crm-communication-api/graph/model.Time"
+  JSON:
+    model: "crm-communication-api/graph/model.JSON"
