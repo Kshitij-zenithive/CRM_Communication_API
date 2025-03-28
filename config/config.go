@@ -11,6 +11,7 @@ import (
 )
 
 type Config struct {
+	// Existing fields...
 	DatabaseURL           string
 	GoogleClientID        string
 	GoogleClientSecret    string
@@ -23,7 +24,20 @@ type Config struct {
 	LogLevel              string
 	Port                  string
 	GmailSyncInterval     time.Duration
-	BaseURL               string // Added Base URL
+	BaseURL               string
+
+	DBHost                   string
+	DBUser                   string
+	DBPassword               string
+	DBName                   string
+	DBPort                   string
+	DBSSLMode                string
+	GoEnv                    string
+	DBMaxIdleConns           int
+	DBMaxOpenConns           int
+	DBConnMaxLifetimeMinutes time.Duration
+	JWTSecret                string // Add this field to match the error
+
 }
 
 func LoadConfig() *Config {
@@ -49,6 +63,10 @@ func LoadConfig() *Config {
 		log.Fatal("Invalid GMAIL_SYNC_INTERVAL:", err)
 	}
 
+	// Convert string to int with error handling for max connections
+	maxIdleConns, _ := strconv.Atoi(getEnvOrDefault("DB_MAX_IDLE_CONNS", "10"))
+	maxOpenConns, _ := strconv.Atoi(getEnvOrDefault("DB_MAX_OPEN_CONNS", "100"))
+
 	return &Config{
 		DatabaseURL:           os.Getenv("DATABASE_URL"),
 		GoogleClientID:        os.Getenv("GOOGLE_CLIENT_ID"),
@@ -62,7 +80,26 @@ func LoadConfig() *Config {
 		LogLevel:              getEnvOrDefault("LOG_LEVEL", "INFO"),
 		Port:                  getEnvOrDefault("PORT", "8080"),
 		GmailSyncInterval:     time.Duration(gmailSyncInterval) * time.Second,
-		BaseURL:               getEnvOrDefault("BASE_URL", "http://localhost:8080"), // Default base URL
+		BaseURL:               getEnvOrDefault("BASE_URL", "http://localhost:8080"),
+		JWTSecret:             getEnvOrDefault("JWT_SECRET_KEY", "default_access_token_secret_key"),
+
+		// New database-related fields
+		DBHost:     getEnvOrDefault("DB_HOST", "localhost"),
+		DBUser:     getEnvOrDefault("DB_USER", "postgres"),
+		DBPassword: getEnvOrDefault("DB_PASSWORD", ""),
+		DBName:     getEnvOrDefault("DB_NAME", "defaultdb"),
+		DBPort:     getEnvOrDefault("DB_PORT", "5432"),
+		DBSSLMode:  getEnvOrDefault("DB_SSL_MODE", "require"),
+		GoEnv:      getEnvOrDefault("GO_ENV", "development"),
+
+		DBMaxIdleConns: maxIdleConns,
+		DBMaxOpenConns: maxOpenConns,
+		DBConnMaxLifetimeMinutes: time.Duration(
+			func() int {
+				val, _ := strconv.Atoi(getEnvOrDefault("DB_CONN_MAX_LIFETIME_MINUTES", "30"))
+				return val
+			}(),
+		) * time.Minute,
 	}
 }
 

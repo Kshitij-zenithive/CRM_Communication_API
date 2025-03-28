@@ -1,0 +1,244 @@
+# graph/schema.graphqls 
+
+# --- Queries ---
+type Query {
+  me: User!
+  getUser(id: ID!): User
+  clients: [Client!]!
+  client(id: ID!): Client
+  messages(conversationId: ID!): [Message!]!
+  conversations: [Conversation!]!
+  conversation(id: ID!): Conversation
+  emails(clientId: ID!): [Email!]!
+  timeline(clientId: ID!): [TimelineEvent!]!
+  emailTemplates: [EmailTemplate!]!
+  emailTemplate(id: ID!): EmailTemplate
+  tasks: [Task!]!
+  task(id: ID!): Task
+  reminders: [Reminder!]!
+}
+
+# --- Mutations ---
+type Mutation {
+  login(email: String!, password: String!): AuthPayload!
+  googleLogin(code: String!): AuthPayload!
+  refreshToken(refreshToken: String!) : AuthPayload!
+
+  createUser(input: NewUserInput!): User!
+  createClient(input: NewClientInput!): Client!
+  createConversation(input: NewConversationInput!): Conversation!
+  sendMessage(input: NewMessageInput!): Message!
+  sendEmail(input: NewEmailInput!): Email!
+  sendEmailWithTemplate(input: NewEmailWithTemplateInput!): Email!
+  syncGmail: Boolean!
+  createEmailTemplate(input: NewEmailTemplateInput!): EmailTemplate!
+  updateEmailTemplate(id: ID!, input: UpdateEmailTemplateInput!): EmailTemplate!
+  deleteEmailTemplate(id: ID!): Boolean!
+  markMessageAsRead(messageId: ID!): Boolean! # Removed userId from the signature
+  createTask(input: NewTaskInput!): Task!
+  updateTask(id: ID!, input: UpdateTaskInput!): Task!
+  deleteTask(id: ID!): Boolean!
+  createReminder(input: NewReminderInput!): Reminder!
+  updateReminder(id: ID!, input: UpdateReminderInput!): Reminder!
+  deleteReminder(id: ID!): Boolean!
+}
+
+# --- Subscriptions ---
+type Subscription {
+	messageReceived(conversationId: ID!): Message!
+}
+
+# --- Types ---
+type User {
+  id: ID!
+  name: String!
+  email: String!
+  avatar: String
+  role: String!
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+type Client {
+  id: ID!
+  name: String!
+  email: String!
+  company: String
+  createdAt: Time!
+  updatedAt: Time!
+}
+
+# --- Conversations ---
+type Conversation {
+    id:           ID!
+    type:         String!
+    name:         String
+    clientId:     ID
+    participants: [User!]!
+    messages:     [Message!]!
+    createdAt:    Time!
+    updatedAt:    Time!
+}
+
+type Message {
+  id: ID!
+  conversation: Conversation!
+  sender: User!
+  content: String!
+  mentions: [User!]
+  readBy: [User!]  # Simplified for the schema
+  createdAt: Time!
+}
+
+type Email {
+  id: ID!
+  client: Client!
+  user: User!
+  googleId: String
+  subject: String!
+  from: String!
+  to: String!
+  body: String!
+  snippet: String!
+  threadId: String
+  received: Time
+  createdAt: Time!
+}
+
+type TimelineEvent {
+    id:          ID!
+    client:      Client
+    user:        User!
+    eventType:   String!
+    title:       String!
+	content:     String!
+    eventTime:   Time!
+    createdAt: Time!
+    updatedAt: Time!
+}
+
+type AuthPayload {
+  accessToken: String!
+  refreshToken: String!
+  user: User!
+}
+
+type EmailTemplate {
+	id:        ID!
+	name:      String!
+	subject:   String!
+	body:      String!
+	createdAt: Time!
+	updatedAt: Time!
+}
+
+type Task {
+    id:           ID!
+    title:        String!
+    description:  String
+    assignedUser: User!
+    creator:      User!
+    dueDate:      Time
+    completed:    Boolean!
+    completedAt:  Time
+    client:       Client
+    createdAt:    Time!
+    updatedAt:    Time!
+}
+
+type Reminder {
+    id:        ID!
+    user:      User!
+    content:   String!
+    remindAt:  Time!
+    triggered: Boolean!
+    createdAt: Time!
+}
+
+# --- Inputs ---
+
+input NewUserInput {
+  name: String!
+  email: String!
+  password: String!
+  avatar: String
+  role: String
+}
+
+input NewClientInput {
+  name: String!
+  email: String!
+  company: String
+}
+
+# New input for creating conversations
+input NewConversationInput {
+    type:        String!
+    name:        String
+    clientId:    ID
+    userIds:     [ID!]!  # Users to include in the conversation
+}
+
+input NewMessageInput {
+  content: String!
+  conversationId: ID! # Changed to conversationId
+}
+
+input NewEmailInput {
+	from: String! #Now required
+    to: [String!]!
+    subject: String!
+    body: String!
+}
+
+input NewEmailWithTemplateInput {
+	to: [String!]!
+	templateId: ID!
+	templateData: JSON!
+}
+
+input NewEmailTemplateInput {
+  name: String!
+  subject: String!
+  body: String!
+}
+
+input UpdateEmailTemplateInput {
+  name: String
+  subject: String
+  body: String
+}
+
+input NewTaskInput {
+    title:       String!
+    description: String
+    assignedTo:  ID!
+    dueDate:     Time
+    clientId:    ID
+}
+
+input UpdateTaskInput {
+    title:       String
+    description: String
+    assignedTo:  ID
+    dueDate:     Time
+    completed:   Boolean
+    clientId:    ID
+}
+
+input NewReminderInput {
+    content:  String!
+    remindAt: Time!
+}
+
+input UpdateReminderInput {
+    content:   String
+    remindAt:  Time
+    triggered: Boolean
+}
+
+
+# --- Scalars ---
+
+scalar Time
+scalar JSON

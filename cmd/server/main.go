@@ -1,177 +1,308 @@
-// cmd/server/main.go (Corrected)
-
+// cmd/server/main.go
 package main
 
 import (
 	"context"
+	"crm-communication-api/config"
+	"crm-communication-api/internal/auth"
+	"crm-communication-api/internal/db"
+	"crm-communication-api/internal/middleware"
+	"crm-communication-api/internal/model" // Import model for migrations
+	"crm-communication-api/internal/repository"
+	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
-
-	"crm-communication-api/config"
-	"crm-communication-api/database"
-	"crm-communication-api/graph"           // Corrected import
-	"crm-communication-api/graph/generated" // Corrected import
-	"crm-communication-api/internal/auth"
-	"crm-communication-api/internal/middleware"
-	"crm-communication-api/internal/repository"
-	"crm-communication-api/internal/service"
-	"crm-communication-api/internal/websocket"
-
-	"github.com/99designs/gqlgen/graphql/handler"
-	"github.com/99designs/gqlgen/graphql/playground"
-	"github.com/gorilla/mux"
-	"github.com/rs/cors" // Import the cors package
 )
 
 func main() {
-	// Load configuration
-	cfg := config.LoadConfig()
+	// --- Configuration ---
+	cfg := config.LoadConfig() // Load config without arguments
+	if cfg == nil {
+		slog.Error("Failed to load configuration")
+		os.Exit(1)
+	}
 
-	// Initialize database connection
-	db, err := database.Connect(cfg)
+	// --- Logging ---
+	logLevel := slog.LevelInfo
+	if cfg.GoEnv == "development" {
+		logLevel = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+	slog.SetDefault(logger) // Set as default logger
+
+	logger.Info("Starting CRM Communication API", slog.String("environment", cfg.GoEnv))
+
+	// --- Database ---
+	database, err := db.InitDB(cfg, logger)
 	if err != nil {
-		log.Fatal("Failed to connect to database:", err)
+		logger.Error("Failed to initialize database", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	// Optional: Get underlying sql.DB for closing later if needed, though GORM handles closing
+	// sqlDB, _ := database.DB()
+	// defer sqlDB.Close() // Or handle closing during graceful shutdown
+
+	// --- Migrations ---
+	logger.Info("Running database migrations...")
+	err = database.AutoMigrate(
+		&model.User{},
+		&model.Client{},
+		&model.Conversation{},
+		&model.ConversationParticipant{},
+		&model.Message{},
+		&model.Email{},
+		&model.EmailAttachment{},
+		&model.EmailTemplate{},
+		&model.RefreshToken{},  // Include new models
+		&model.OAuthProvider{}, // Include new models
+		&model.TimelineEvent{},
+		&model.MessageReadReceipt{},
+		// Add any other models here
+	)
+	if err != nil {
+		logger.Error("Database migration failed", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	logger.Info("Database migrations completed successfully")
+
+	// --- Repository ---
+	repo := repository.NewRepository(database)
+	logger.Info("Repository initialized")
+
+	// --- Services ---
+	
+	// Initialize AuthService (constructor defined in internal/auth/service.go)
+	authService, err := auth.NewAuthService(repo, cfg, logger)
+	if err != nil {
+		logger.Error("Failed to initialize AuthService", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 
-	// Initialize repository
-	repo := repository.NewRepository(db.DB)
+	// Example usage of authService to avoid "declared and not used" error
+	logger.Info("AuthService initialized successfully", slog.String("service", fmt.Sprintf("%T", authService)))
+	// Initialize other services here later (e.g., ConversationService, ClientService)
 
-	// Initialize WebSocket hub
-	hub := websocket.NewHub()
-	go hub.Run()
+	// --- HTTP Router ---
+	mux := http.NewServeMux()
 
-	// Initialize services
-	googleAuthService := auth.NewGoogleAuthService(cfg, repo)                        // Pass repository
-	templateService := service.NewTemplateService(repo)                              // Use correct service
-	emailService := service.NewEmailService(repo, googleAuthService.GetGmailService) //Corrected
-	chatService := service.NewChatService(repo, hub)
-	taskService := service.NewTaskService(repo)         // Corrected
-	reminderService := service.NewReminderService(repo) // Corrected
-	userService := service.NewUserService(repo)
-	interactionService := service.NewInteractionService(repo)
+	// --- Middleware ---
+	authMiddleware := middleware.AuthMiddleware(cfg) // Create instance of auth middleware
 
-	// Initialize GraphQL resolver
-	resolver := &graph.Resolver{
-		ChatService:        chatService,
-		EmailService:       emailService,
-		InteractionService: interactionService,
-		TaskService:        taskService,     // Add TaskService
-		ReminderService:    reminderService, // Add ReminderService
-		UserService:        userService,     // Add UserService
-		TemplateService:    templateService, // Corrected
-		AuthService:        googleAuthService,
-		Repository:         repo,
-		Hub:                hub,
-		Config:             cfg,
-	}
+	// Example usage of authMiddleware
+	mux.Handle("/secure-endpoint", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, `{"status": "secure"}`)
+	})))
 
-	// Create a new GraphQL server
-	srv := handler.NewDefaultServer(generated.NewExecutableSchema(generated.Config{Resolvers: resolver}))
-
-	// Set up HTTP router
-	r := mux.NewRouter()
-
-	// CORS middleware setup (before any other middleware!)
-	c := cors.New(cors.Options{
-		AllowedOrigins:   []string{"*"}, // !!! IMPORTANT: In production, be specific!
-		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-		AllowedHeaders:   []string{"Authorization", "Content-Type"},
-		AllowCredentials: true,
-	})
-	r.Use(c.Handler) // Apply CORS to all routes
-
-	// Middleware
-	r.Use(middleware.AuthMiddleware(cfg))
-
-	// Google OAuth routes (no middleware here)
-	r.HandleFunc("/auth/google/login", func(w http.ResponseWriter, r *http.Request) {
-		url := googleAuthService.GetAuthCodeURL()
-		http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+	// --- Routes ---
+	// Basic health check
+	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, `{"status": "ok"}`)
 	})
 
-	r.HandleFunc("/auth/google/callback", func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			http.Error(w, "Authorization code is required", http.StatusBadRequest)
-			return
-		}
+	// Placeholder for GraphQL Handler (using auth middleware)
+	// graphQLHandler := /* ... Initialize your GraphQL handler here ... */
+	// mux.Handle("/graphql", authMiddleware(graphQLHandler)) // Apply auth middleware
 
-		jwtToken, refreshToken, err := googleAuthService.AuthenticateUser(r.Context(), code)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Authentication failed: %v", err), http.StatusUnauthorized)
-			return
-		}
-		//set cookies
-		http.SetCookie(w, &http.Cookie{
-			Name:     "jwt",
-			Value:    jwtToken,
-			Path:     "/",
-			HttpOnly: true,                 // Important for security
-			Secure:   false,                // Set to true in production if using HTTPS
-			SameSite: http.SameSiteLaxMode, //CSRF
-			// Expires: ,  // Set expiry appropriately
-		})
+	// Add HTTP handlers for OAuth callbacks if needed (might not use auth middleware)
+	// mux.HandleFunc("GET /auth/google/callback", /* Handler using authService */ )
 
-		http.SetCookie(w, &http.Cookie{
-			Name:     "refresh_token",
-			Value:    refreshToken,
-			Path:     "/",
-			HttpOnly: true,
-			Secure:   false,
-			SameSite: http.SameSiteLaxMode,
-			// Expires: ,
-		})
 
-		// Redirect to frontend with tokens (consider using cookies or local storage)
-		http.Redirect(w, r, cfg.BaseURL, http.StatusTemporaryRedirect) // Redirect to frontend
-	})
-
-	// GraphQL endpoint
-	r.Handle("/query", srv)
-
-	// GraphQL playground (for development)
-	r.Handle("/playground", playground.Handler("GraphQL playground", "/query"))
-
-	// WebSocket endpoint
-	r.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		websocket.ServeWs(hub, w, r)
-	})
-
-	// Start HTTP server with graceful shutdown
+	// --- HTTP Server ---
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%s", cfg.Port),
-		Handler:      r,
-		ReadTimeout:  15 * time.Second, // Good practice
-		WriteTimeout: 15 * time.Second, // Good practice
+		Addr:    fmt.Sprintf(":%s", cfg.Port),
+		Handler: mux, // Use the main router
+		// Add timeouts for production readiness
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
-	// Start server in a goroutine
+	// --- Start Server Goroutine ---
 	go func() {
-		log.Printf("Server listening on port %s", cfg.Port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %s\n", err)
+		logger.Info("Server starting", slog.String("address", server.Addr))
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("Server failed to start", slog.String("error", err.Error()))
+			os.Exit(1)
 		}
 	}()
 
-	// Wait for interrupt signal to gracefully shutdown the server
+	// --- Graceful Shutdown ---
 	quit := make(chan os.Signal, 1)
+	// Notify channel on SIGINT (Ctrl+C) or SIGTERM (sent by Docker/Kubernetes)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Println("Shutting down server...")
 
-	// Create a context with a timeout for shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Block until a signal is received
+	sig := <-quit
+	logger.Info("Shutdown signal received", slog.String("signal", sig.String()))
+
+	// Create a context with timeout for shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // 30-second timeout
 	defer cancel()
 
-	// Shutdown the server
+	// Attempt graceful shutdown
 	if err := server.Shutdown(ctx); err != nil {
-		log.Fatal("Server forced to shutdown:", err)
+		logger.Error("Server forced to shutdown", slog.String("error", err.Error()))
+		os.Exit(1) // Exit with error if shutdown fails
 	}
 
-	log.Println("Server exiting")
+	logger.Info("Server exiting gracefully")
 }
+
+
+
+// cmd/server/main.go
+// package main
+
+// import (
+// 	"context"
+// 	"crm-communication-api/config"
+// 	"crm-communication-api/internal/auth"
+// 	"crm-communication-api/internal/db"
+// 	"crm-communication-api/internal/middleware"
+// 	"crm-communication-api/internal/model" // Import model for migrations
+// 	"crm-communication-api/internal/repository"
+// 	"errors"
+// 	"fmt"
+// 	"log/slog"
+// 	"net/http"
+// 	"os"
+// 	"os/signal"
+// 	"syscall"
+// 	"time"
+// )
+
+// func main() {
+// 	// --- Configuration ---
+// 	cfg, err := config.LoadConfig(".") // Load config from current directory (or specify path)
+// 	if err != nil {
+// 		slog.Error("Failed to load configuration", slog.String("error", err.Error()))
+// 		os.Exit(1)
+// 	}
+
+// 	// --- Logging ---
+// 	logLevel := slog.LevelInfo
+// 	if cfg.GoEnv == "development" {
+// 		logLevel = slog.LevelDebug
+// 	}
+// 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+// 	slog.SetDefault(logger) // Set as default logger
+
+// 	logger.Info("Starting CRM Communication API", slog.String("environment", cfg.GoEnv))
+
+// 	// --- Database ---
+// 	database, err := db.InitDB(cfg, logger)
+// 	if err != nil {
+// 		logger.Error("Failed to initialize database", slog.String("error", err.Error()))
+// 		os.Exit(1)
+// 	}
+// 	// Optional: Get underlying sql.DB for closing later if needed, though GORM handles closing
+// 	// sqlDB, _ := database.DB()
+// 	// defer sqlDB.Close() // Or handle closing during graceful shutdown
+
+// 	// --- Migrations ---
+// 	logger.Info("Running database migrations...")
+// 	err = database.AutoMigrate(
+// 		&model.User{},
+// 		&model.Client{},
+// 		&model.Conversation{},
+// 		&model.ConversationParticipant{},
+// 		&model.Message{},
+// 		&model.Email{},
+// 		&model.EmailAttachment{},
+// 		&model.EmailTemplate{},
+// 		&model.RefreshToken{},  // Include new models
+// 		&model.OAuthProvider{}, // Include new models
+// 		&model.TimelineEvent{},
+// 		&model.MessageReadReceipt{},
+// 		// Add any other models here
+// 	)
+// 	if err != nil {
+// 		logger.Error("Database migration failed", slog.String("error", err.Error()))
+// 		os.Exit(1)
+// 	}
+// 	logger.Info("Database migrations completed successfully")
+
+// 	// --- Repository ---
+// 	repo := repository.NewRepository(database)
+// 	logger.Info("Repository initialized")
+
+// 	// --- Services ---
+// 	// Initialize AuthService (constructor defined in internal/auth/service.go)
+// 	authService, err := auth.NewAuthService(repo, cfg, logger)
+// 	if err != nil {
+// 		logger.Error("Failed to initialize AuthService", slog.String("error", err.Error()))
+// 		os.Exit(1)
+// 	}
+// 	// Initialize other services here later (e.g., ConversationService, ClientService)
+
+// 	// --- HTTP Router ---
+// 	mux := http.NewServeMux()
+
+// 	// --- Middleware ---
+// 	authMiddleware := middleware.AuthMiddleware(cfg) // Create instance of auth middleware
+
+// 	// --- Routes ---
+// 	// Basic health check
+// 	mux.HandleFunc("GET /ping", func(w http.ResponseWriter, r *http.Request) {
+// 		w.Header().Set("Content-Type", "application/json")
+// 		w.WriteHeader(http.StatusOK)
+// 		fmt.Fprintln(w, `{"status": "ok"}`)
+// 	})
+
+// 	// Placeholder for GraphQL Handler (using auth middleware)
+// 	// graphQLHandler := /* ... Initialize your GraphQL handler here ... */
+// 	// mux.Handle("/graphql", authMiddleware(graphQLHandler)) // Apply auth middleware
+
+// 	// Add HTTP handlers for OAuth callbacks if needed (might not use auth middleware)
+// 	// mux.HandleFunc("GET /auth/google/callback", /* Handler using authService */ )
+
+
+// 	// --- HTTP Server ---
+// 	server := &http.Server{
+// 		Addr:    fmt.Sprintf(":%s", cfg.Port),
+// 		Handler: mux, // Use the main router
+// 		// Add timeouts for production readiness
+// 		ReadTimeout:  5 * time.Second,
+// 		WriteTimeout: 10 * time.Second,
+// 		IdleTimeout:  120 * time.Second,
+// 	}
+
+// 	// --- Start Server Goroutine ---
+// 	go func() {
+// 		logger.Info("Server starting", slog.String("address", server.Addr))
+// 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+// 			logger.Error("Server failed to start", slog.String("error", err.Error()))
+// 			os.Exit(1)
+// 		}
+// 	}()
+
+// 	// --- Graceful Shutdown ---
+// 	quit := make(chan os.Signal, 1)
+// 	// Notify channel on SIGINT (Ctrl+C) or SIGTERM (sent by Docker/Kubernetes)
+// 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+// 	// Block until a signal is received
+// 	sig := <-quit
+// 	logger.Info("Shutdown signal received", slog.String("signal", sig.String()))
+
+// 	// Create a context with timeout for shutdown
+// 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // 30-second timeout
+// 	defer cancel()
+
+// 	// Attempt graceful shutdown
+// 	if err := server.Shutdown(ctx); err != nil {
+// 		logger.Error("Server forced to shutdown", slog.String("error", err.Error()))
+// 		os.Exit(1) // Exit with error if shutdown fails
+// 	}
+
+// 	logger.Info("Server exiting gracefully")
+// }
