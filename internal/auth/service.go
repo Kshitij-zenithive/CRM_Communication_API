@@ -38,10 +38,50 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5" // Use alias if preferred: jwtv5 "github.com/golang-jwt/jwt/v5"
+	"context"
+	"net/http"
+
+	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
+	"golang.org/x/oauth2/google" // Use alias if preferred: jwtv5 "github.com/golang-jwt/jwt/v5"
+
+	// Needed for GetGmailService return type
+
+	graphmodel "crm-communication-api/graph/model"
+
+	// Alias for graph model
+	dbmodel "crm-communication-api/internal/model"
 )
+
+// Alias for DB model
+
+// Service defines the interface for all authentication operations.
+// Concrete implementations (like LocalAuthService, GoogleAuthService) will provide the logic.
+type Service interface {
+	// Login handles standard email/password authentication.
+	Login(ctx context.Context, email, password string) (*graphmodel.AuthPayload, error)
+
+	// AuthenticateGoogleUser handles the callback from Google OAuth.
+	AuthenticateGoogleUser(ctx context.Context, code string) (*graphmodel.AuthPayload, error)
+
+	// RefreshToken generates new access and refresh tokens.
+	RefreshToken(ctx context.Context, refreshToken string) (*graphmodel.AuthPayload, error)
+
+	// GetCurrentUser retrieves the currently authenticated user from context claims.
+	GetCurrentUser(ctx context.Context) (*dbmodel.User, error) // Returns internal db model
+
+	// GetAuthCodeURL returns the URL to initiate the Google OAuth flow.
+	GetAuthCodeURL() string
+
+	// GetGmailService returns an authenticated http client for Gmail API calls using user's token.
+	GetGmailService(ctx context.Context, userID string) (*http.Client, error)
+
+	// VerifyJWT validates a token string. Useful for middleware or other services.
+	VerifyJWT(tokenString string) (*Claims, error)
+}
+
+// Note: The concrete AuthService struct and NewAuthService constructor are removed from this file.
+// Implementations will be in local.go and google.go.
 
 const (
 	// Lifespan for the signed OAuth state token
@@ -87,7 +127,6 @@ func NewAuthService(repo repository.AuthRepository, cfg *config.Config, logger *
 		logger.Warn("Google OAuth not configured")
 	}
 
-
 	service := &AuthService{
 		repo:              repo,
 		config:            cfg,
@@ -100,22 +139,4 @@ func NewAuthService(repo repository.AuthRepository, cfg *config.Config, logger *
 	return service, nil
 }
 
-
-// --- Helper Methods ---
-
-// generateStandardClaims generates standard JWT claims with expiry.
-func (s *AuthService) generateStandardClaims(userID fmt.Stringer, email string, role string, duration time.Duration) *Claims {
-	now := time.Now()
-	expiresAt := now.Add(duration)
-	return &Claims{
-		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   userID.String(),
-			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(expiresAt),
-			Issuer:    "crm-communication-api", // Consider making this configurable
-			// Audience: []string{"your-client"}, // Optional: If needed
-		},
-		Email: email,
-		Role:  role,
-	}
-}
+ZZZZZZZ

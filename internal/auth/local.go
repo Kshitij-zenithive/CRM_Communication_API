@@ -140,106 +140,177 @@ package auth
 
 import (
 	"context"
+	"crm-communication-api/config"
+	graphmodel "crm-communication-api/graph/model"
 	dbmodel "crm-communication-api/internal/model"
-	"crm-communication-api/internal/repository" // Import repository specifically for ErrNotFound check
+	"crm-communication-api/internal/repository"
 	"errors"
 	"fmt"
-	"log/slog"
-	"strings"
+	"log/slog"      // Added import
+	"net/http"    // Added import for GetGmailService signature
 
-	"golang.org/x/crypto/bcrypt" // Used for error comparison
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt" // Added import for error check
 )
 
-// Register creates a new user account with email and password.
-func (s *AuthService) Register(ctx context.Context, name, email, password string) (*dbmodel.User, error) {
-	s.logger.Debug("Attempting user registration", slog.String("email", email))
+// LocalAuthService handles email/password authentication.
+type LocalAuthService struct {
+	repo          repository.AuthRepository // Use the specific interface for DB access
+	config        *config.Config
+	logger        *slog.Logger              // Added logger
+	jwtSigningKey []byte                  // Added JWT key
+}
 
-	// Validate input (basic example)
-	if name == "" || email == "" || password == "" {
-		return nil, fmt.Errorf("name, email, and password are required")
-	}
-	// Consider adding more robust email validation
+// Assert that LocalAuthService implements the Service interface
+var _ Service = (*LocalAuthService)(nil)
 
-	// Check if user already exists
-	existingUser, err := s.repo.GetUserByEmail(ctx, email)
-	if err != nil && !errors.Is(err, repository.ErrNotFound) {
-		s.logger.Error("Failed to check for existing user during registration", slog.String("email", email), slog.String("error", err.Error()))
-		return nil, fmt.Errorf("failed to verify user existence: %w", err) // Internal error
+// NewLocalAuthService creates a new LocalAuthService instance.
+func NewLocalAuthService(repo repository.AuthRepository, cfg *config.Config, logger *slog.Logger) (*LocalAuthService, error) {
+	// Validate essential configuration
+	if cfg.JWTSecretKey == "" { // Check correct field name
+		return nil, ErrMissingJWTSecret
 	}
-	if existingUser != nil {
-		s.logger.Warn("Registration attempt with existing email", slog.String("email", email))
-		return nil, ErrEmailTaken
-	}
+	jwtKey := []byte(cfg.JWTSecretKey) // Use correct field name
 
-	// Create user model
-	user := &dbmodel.User{
-		Name:  strings.TrimSpace(name),
-		Email: strings.ToLower(strings.TrimSpace(email)),
-		Role:  "user", // Default role, consider making this configurable or dynamic
-	}
+	return &LocalAuthService{
+		repo:          repo,
+		config:        cfg,
+		logger:        logger.With(slog.String("service", "LocalAuthService")), // Add context
+		jwtSigningKey: jwtKey,
+	}, nil
+}
 
-	// Hash password using the method on the User model
-	if err := user.SetPassword(password); err != nil {
-		s.logger.Error("Failed to hash password during registration", slog.String("email", email), slog.String("error", err.Error()))
-		return nil, ErrPasswordHashing
-	}
+// Login handles email/password authentication.
+func (s *LocalAuthService) Login(ctx context.Context, email, password string) (*graphmodel.AuthPayload, error) {
+	l := s.logger.With(slog.String("method", "Login"), slog.String("email", email))
+	l.Debug("Attempting local login")
 
-	// Save user to database
-	if err := s.repo.CreateUser(ctx, user); err != nil {
-		s.logger.Error("Failed to create user in repository", slog.String("email", email), slog.String("error", err.Error()))
-		// Check for potential duplicate email race condition errors if the DB enforces uniqueness
-		// if errors.Is(err, <specific_db_duplicate_error>) { return nil, ErrEmailTaken }
-		return nil, fmt.Errorf("failed to save new user: %w", err) // Internal error
+	// Fetch dbmodel.User
+	user, err := s.repo.GetUserByEmail(ctx, email)
+	if err != nil {
+		l.Warn("Login failed: user lookup error", slog.String("error", err.Error()))
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrInvalidCredentials // Generic error
+		}
+		return nil, fmt.Errorf("internal error retrieving user: %w", err)
 	}
 
-	s.logger.Info("User registered successfully", slog.String("userID", user.ID.String()), slog.String("email", email))
-	// Avoid returning password hash in the response object
-	user.Password = "" // Clear password hash before returning
+	if user.PasswordHash == "" { // Check correct field name
+		l.Warn("Login attempt failed for OAuth user", slog.String("userID", user.ID.String()))
+		return nil, ErrInvalidCredentials
+	}
+
+	// Compare password using method on dbmodel.User
+	if err := user.ComparePassword(password); err != nil {
+		l.Warn("Invalid password attempt", slog.String("userID", user.ID.String()))
+		if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
+			return nil, ErrInvalidCredentials
+		}
+		l.Error("Password comparison unexpected error", slog.String("userID", user.ID.String()), slog.String("error", err.Error()))
+		return nil, ErrInvalidCredentials
+	}
+
+	// Generate tokens using package-level helpers from jwt.go
+	accessToken, err := GenerateJWT(user, "local", s.config) // Pass necessary args
+	if err != nil {
+		l.Error("Failed to generate access token", slog.String("userID", user.ID.String()), slog.String("error", err.Error()))
+		return nil, fmt.Errorf("login failed during access token generation: %w", err)
+	}
+
+	// Pass repo interface to GenerateRefreshToken
+	refreshToken, err := GenerateRefreshToken(ctx, user.ID, s.repo, s.config) // Pass repo
+	if err != nil {
+		l.Error("Failed to generate refresh token", slog.String("userID", user.ID.String()), slog.String("error", err.Error()))
+		return nil, fmt.Errorf("login failed during refresh token generation: %w", err)
+	}
+
+	l.Info("User logged in successfully via local auth", slog.String("userID", user.ID.String()))
+	return createAuthPayload(user, accessToken, refreshToken), nil // Use helper
+}
+
+// RefreshToken uses shared logic via package-level helper.
+func (s *LocalAuthService) RefreshToken(ctx context.Context, refreshToken string) (*graphmodel.AuthPayload, error) {
+	// Pass repo interface directly to the package-level helper
+	newAccessToken, newRefreshToken, err := RefreshAccessToken(ctx, refreshToken, s.repo, s.config)
+	if err != nil {
+		return nil, err // Error is already context-rich from helper
+	}
+
+	// Verify new token to get claims
+	claims, err := VerifyJWT(newAccessToken, s.config) // Use package-level helper
+	if err != nil {
+		// This indicates a potential issue if the token generated by RefreshAccessToken is invalid
+		s.logger.Error("Failed to verify newly generated access token", slog.String("error", err.Error()))
+		return nil, fmt.Errorf("internal error verifying refreshed token: %w", err)
+	}
+	userID, err := uuid.Parse(claims.Subject) // Use Subject claim
+	if err != nil {
+        s.logger.Error("Invalid UserID found in refreshed token claims", slog.String("subject", claims.Subject), slog.String("error", err.Error()))
+        return nil, fmt.Errorf("internal error processing refreshed token claims")
+    }
+
+
+	// Fetch dbmodel.User
+	user, err := s.repo.GetUserByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve user during refresh: %w", err)
+	}
+
+	return createAuthPayload(user, newAccessToken, newRefreshToken), nil // Use helper
+}
+
+// GetCurrentUser uses context helper and repository.
+func (s *LocalAuthService) GetCurrentUser(ctx context.Context) (*dbmodel.User, error) {
+	// Use helper function defined in auth/context.go
+	userID, err := GetUserIDFromContext(ctx)
+	if err != nil {
+		s.logger.Warn("Attempted to get current user but no user ID in context", slog.String("error", err.Error()))
+		return nil, err // Propagate ErrUserNotInContext or parsing error
+	}
+
+	user, err := s.repo.GetUserByID(ctx, userID)
+	if err != nil {
+		s.logger.Error("Failed to retrieve authenticated user from repository", slog.String("userID", userID.String()), slog.String("error", err.Error()))
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrUserNotFound // User in token claims doesn't exist in DB
+		}
+		return nil, fmt.Errorf("internal error retrieving user: %w", err)
+	}
 	return user, nil
 }
 
-// LocalLogin authenticates a user with email and password, returning new tokens.
-func (s *AuthService) LocalLogin(ctx context.Context, email, password string) (accessToken string, refreshToken string, err error) {
-	s.logger.Debug("Attempting local login", slog.String("email", email))
+// VerifyJWT delegates to the package-level helper in jwt.go
+func (s *LocalAuthService) VerifyJWT(tokenString string) (*Claims, error) {
+    return VerifyJW(tokenString, s.config)
+}
 
-	// Get user by email
-	user, err := s.repo.GetUserByEmail(ctx, email)
-	if err != nil {
-		s.logger.Warn("Login attempt for non-existent email", slog.String("email", email), slog.String("error", err.Error()))
-		if errors.Is(err, repository.ErrNotFound) {
-			return "", "", ErrInvalidCredentials // Use generic error for non-existent user
-		}
-		return "", "", fmt.Errorf("failed to retrieve user: %w", err) // Internal error
+
+// --- Google Specific Methods (Stubs for LocalAuthService) ---
+
+func (s *LocalAuthService) AuthenticateGoogleUser(ctx context.Context, code string) (*graphmodel.AuthPayload, error) {
+	return nil, fmt.Errorf("local auth service does not handle Google OAuth")
+}
+
+func (s *LocalAuthService) GetAuthCodeURL() string {
+	return "" // No URL applicable
+}
+
+func (s *LocalAuthService) GetGmailService(ctx context.Context, userID string) (*http.Client, error) {
+    return nil, fmt.Errorf("local auth service cannot provide Gmail service client")
+}
+
+// createAuthPayload is a helper common to different auth methods
+func createAuthPayload(user *dbmodel.User, accessToken, refreshToken string) *graphmodel.AuthPayload {
+	return &graphmodel.AuthPayload{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		User: &graphmodel.User{
+			ID:     user.ID.String(),
+			Name:   user.Name,
+			Email:  user.Email,
+			Avatar: &user.Avatar,
+			Role:   user.Role,
+			// Add CreatedAt/UpdatedAt if they exist in graphmodel.User
+		},
 	}
-
-	// Compare password using the method on the User model
-	if err := user.ComparePassword(password); err != nil {
-		s.logger.Warn("Invalid password attempt", slog.String("userID", user.ID.String()), slog.String("email", email))
-		if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
-			return "", "", ErrInvalidCredentials // Generic error for password mismatch
-		}
-		// Log other potential comparison errors (e.g., invalid hash format)
-		s.logger.Error("Password comparison failed", slog.String("userID", user.ID.String()), slog.String("error", err.Error()))
-		return "", "", ErrInvalidCredentials // Still return generic credential error
-	}
-
-	// --- Authentication successful ---
-
-	// Generate new access token
-	accessToken, err = s.GenerateJWT(user.ID, user.Email, user.Role)
-	if err != nil {
-		s.logger.Error("Failed to generate access token after login", slog.String("userID", user.ID.String()), slog.String("error", err.Error()))
-		return "", "", fmt.Errorf("login succeeded but failed to issue access token: %w", err)
-	}
-
-	// Generate new refresh token
-	refreshToken, err = s.GenerateRefreshToken(ctx, user.ID)
-	if err != nil {
-		s.logger.Error("Failed to generate refresh token after login", slog.String("userID", user.ID.String()), slog.String("error", err.Error()))
-		// Allow login to succeed with access token, but log critical failure for refresh token
-		return accessToken, "", fmt.Errorf("login succeeded but failed to issue refresh token: %w", err)
-	}
-
-	s.logger.Info("User logged in successfully via local auth", slog.String("userID", user.ID.String()))
-	return accessToken, refreshToken, nil
 }

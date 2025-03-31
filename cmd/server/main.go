@@ -4,11 +4,13 @@ package main
 import (
 	"context"
 	"crm-communication-api/config"
+	"crm-communication-api/graph"
 	"crm-communication-api/internal/auth"
 	"crm-communication-api/internal/db"
 	"crm-communication-api/internal/middleware"
 	"crm-communication-api/internal/model" // Import model for migrations
 	"crm-communication-api/internal/repository"
+	"crm-communication-api/internal/service"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -85,7 +87,45 @@ func main() {
 
 	// Example usage of authService to avoid "declared and not used" error
 	logger.Info("AuthService initialized successfully", slog.String("service", fmt.Sprintf("%T", authService)))
-	// Initialize other services here later (e.g., ConversationService, ClientService)
+	
+	// cmd/server/main.go
+
+// ... imports ...
+
+	googleAuthService := auth.NewGoogleAuthService(cfg, repo)
+	templateService := service.NewTemplateService(repo)
+	emailService := service.NewEmailService(repo, repo, googleAuthService.GetGmailService, templateService, timelineService, logger) // CORRECTED: Pass repo as userRepo
+	chatService := service.NewChatService(repo, repo, repo, timelineService, notificationSvc, schedulerSvc, logger) // Assuming ChatService needs all repos
+	taskService := service.NewTaskService(repo)
+	reminderService := service.NewReminderService(repo)
+	userService := service.NewUserService(repo)
+    clientService := service.NewClientService(repo) // Added ClientService instantiation
+	interactionService := service.NewInteractionService(repo)
+    timelineService := service.NewTimelineService(repo) // Added TimelineService instantiation
+    notificationSvc := service.NewNotificationService(hub) // Added NotificationService instantiation (using InMemory example)
+    schedulerSvc := service.NewSimpleSchedulerService(logger) // Added SchedulerService instantiation (using Simple example)
+
+
+	// Initialize GraphQL resolver
+	resolver := graph.NewResolver(
+        chatService,
+        emailService,
+        templateService,
+        timelineService, // Pass timeline service
+		interactionService, // Pass interaction service (needed by other services, maybe?) - Review dependencies
+        taskService,       // Pass task service
+        reminderService,   // Pass reminder service
+        userService,       // Pass user service
+        clientService,     // Pass client service
+        repo,
+        googleAuthService, // Pass as auth.Service interface
+        hub,
+        cfg,
+    )
+
+
+
+
 
 	// --- HTTP Router ---
 	mux := http.NewServeMux()
