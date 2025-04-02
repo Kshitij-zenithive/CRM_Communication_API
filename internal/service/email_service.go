@@ -3,7 +3,7 @@ package service
 
 import (
 	"context"
-	"crm-communication-api/internal/auth" // Correctly import auth package
+	"crm-communication-api/internal/auth"          // Correctly import auth package
 	dbmodel "crm-communication-api/internal/model" // Use alias for clarity
 	"crm-communication-api/internal/repository"
 	"crm-communication-api/internal/util"
@@ -11,7 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http" // Import needed for http.Client type from authService.GetGmailService
+
+	// "net/http" // Import needed for http.Client type from authService.GetGmailService
 	"net/mail"
 	"strings"
 	"time"
@@ -26,8 +27,8 @@ import (
 type emailService struct {
 	emailRepo       repository.EmailRepository
 	clientRepo      repository.ClientRepository // Needed to find clients by email
-	authService     *auth.AuthService           // Use concrete type pointer as per last correction
-	userRepo        repository.AuthRepository   // Needed for user lookups
+	authService     auth.Service
+	userRepo        repository.AuthRepository // Needed for user lookups
 	templateService TemplateService
 	timelineService TimelineService
 	logger          *slog.Logger
@@ -40,7 +41,7 @@ var _ EmailService = (*emailService)(nil)
 func NewEmailService(
 	emailRepo repository.EmailRepository,
 	clientRepo repository.ClientRepository,
-	authService *auth.AuthService, // Use concrete type pointer
+	authService auth.Service,
 	userRepo repository.AuthRepository,
 	templateService TemplateService,
 	timelineService TimelineService,
@@ -189,13 +190,12 @@ func (s *emailService) SendEmailWithTemplate(ctx context.Context, senderID, clie
 	if err == nil {
 		variables["ClientName"] = client.Name
 		variables["ClientEmail"] = client.Email
-        if client.Company != nil {
-            variables["ClientCompany"] = *client.Company
-        }
+		if client.Company != nil {
+			variables["ClientCompany"] = *client.Company
+		}
 	} else {
 		l.WarnContext(ctx, "Could not fetch client for template variables", slog.String("error", err.Error()))
 	}
-
 
 	// 3. Render Template
 	renderedSubject, renderedBody, err := s.templateService.RenderTemplate(template, variables)
@@ -257,7 +257,8 @@ func (s *emailService) SyncGmail(ctx context.Context, userID string) error {
 		l.DebugContext(ctx, "Processing page of messages", slog.Int("count", len(listResp.Messages)))
 		for _, m := range listResp.Messages {
 			select {
-			case <-ctx.Done(): return ctx.Err() // Respect context cancellation
+			case <-ctx.Done():
+				return ctx.Err() // Respect context cancellation
 			default:
 			}
 
@@ -316,30 +317,57 @@ func (s *emailService) parseAndSaveGmailMessage(ctx context.Context, internalUse
 	// Parse Headers
 	for _, h := range msg.Payload.Headers {
 		switch strings.ToLower(h.Name) {
-		case "subject": subject = h.Value
+		case "subject":
+			subject = h.Value
 		case "from":
-			addr, err := mail.ParseAddress(h.Value); if err == nil { from = addr.Address } else { from = h.Value }
-		case "to": to = parseAddressList(h.Value)
-		case "cc": cc = parseAddressList(h.Value)
-		case "bcc": bcc = parseAddressList(h.Value)
-		case "date": t, err := util.ParseDate(h.Value); if err == nil { receivedAt = t; sentAt = t }
+			addr, err := mail.ParseAddress(h.Value)
+			if err == nil {
+				from = addr.Address
+			} else {
+				from = h.Value
+			}
+		case "to":
+			to = parseAddressList(h.Value)
+		case "cc":
+			cc = parseAddressList(h.Value)
+		case "bcc":
+			bcc = parseAddressList(h.Value)
+		case "date":
+			t, err := util.ParseDate(h.Value)
+			if err == nil {
+				receivedAt = t
+				sentAt = t
+			}
 		}
 	}
 	if msg.InternalDate > 0 { // Use internal date if more precise
-		internalTime := time.UnixMilli(msg.InternalDate); if !internalTime.IsZero() { receivedAt = internalTime; sentAt = internalTime }
+		internalTime := time.UnixMilli(msg.InternalDate)
+		if !internalTime.IsZero() {
+			receivedAt = internalTime
+			sentAt = internalTime
+		}
 	}
 
 	// Check Labels for Read Status
-	for _, labelId := range msg.LabelIds { if labelId == "UNREAD" { isUnread = true; break } }
+	for _, labelId := range msg.LabelIds {
+		if labelId == "UNREAD" {
+			isUnread = true
+			break
+		}
+	}
 
 	// Extract Body and Snippet
 	bodyHTML, bodyText = extractBodyParts(msg.Payload)
-	if msg.Snippet != "" { snippet = msg.Snippet }
+	if msg.Snippet != "" {
+		snippet = msg.Snippet
+	}
 
 	// Find associated client (check sender first, then recipients)
 	var clientID *uuid.UUID
 	client, err := s.findClientByEmailAddressList(ctx, append([]string{from}, append(to, cc...)...))
-	if err == nil && client != nil { clientID = &client.ID } else if err != nil && !errors.Is(err, repository.ErrNotFound) {
+	if err == nil && client != nil {
+		clientID = &client.ID
+	} else if err != nil && !errors.Is(err, repository.ErrNotFound) {
 		l.WarnContext(ctx, "Error finding client for incoming email", slog.String("error", err.Error()))
 	}
 
@@ -370,7 +398,6 @@ func (s *emailService) parseAndSaveGmailMessage(ctx context.Context, internalUse
 		return fmt.Errorf("failed to save synced email to database: %w", err)
 	}
 	l.InfoContext(ctx, "Successfully synced and saved email", slog.String("internalEmailID", email.ID.String()))
-
 
 	// Trigger Timeline Event
 	timelineEvent := &dbmodel.TimelineEvent{
@@ -440,12 +467,11 @@ func (s *emailService) buildMIMEMessage(email *dbmodel.Email) string {
 
 	builder.WriteString(fmt.Sprintf("Content-Type: %s; charset=\"UTF-8\"\r\n", contentType))
 	builder.WriteString("Content-Transfer-Encoding: base64\r\n")
-	builder.WriteString("\r\n") // Header/Body separator
+	builder.WriteString("\r\n")                                          // Header/Body separator
 	builder.WriteString(base64.URLEncoding.EncodeToString([]byte(body))) // Encode the chosen body
 
 	return builder.String()
 }
-
 
 // findClientByEmailAddress searches for a client matching a single email address.
 func (s *emailService) findClientByEmailAddress(ctx context.Context, emailStr string) (*dbmodel.Client, error) {
@@ -489,7 +515,9 @@ func (s *emailService) findClientByEmailAddressList(ctx context.Context, emails 
 
 // parseAddressList parses a comma-separated list of email addresses.
 func parseAddressList(list string) []string {
-	if list == "" { return nil }
+	if list == "" {
+		return nil
+	}
 	addrs, err := mail.ParseAddressList(list)
 	if err != nil {
 		// Basic fallback: split by comma and trim whitespace
@@ -502,7 +530,9 @@ func parseAddressList(list string) []string {
 				result = append(result, trimmed)
 			}
 		}
-		if len(result) > 0 { return result }
+		if len(result) > 0 {
+			return result
+		}
 		return nil // Return nil if parsing fails and fallback yields nothing
 	}
 	result := make([]string, len(addrs))
@@ -515,7 +545,9 @@ func parseAddressList(list string) []string {
 // extractBodyParts iterates through message parts to find HTML and Text bodies.
 // Prioritizes HTML if available.
 func extractBodyParts(part *gmail.MessagePart) (bodyHTML, bodyText string) {
-	if part == nil { return "", "" }
+	if part == nil {
+		return "", ""
+	}
 
 	// Check current part's body
 	currentHTML, currentText := "", ""
@@ -534,13 +566,21 @@ func extractBodyParts(part *gmail.MessagePart) (bodyHTML, bodyText string) {
 	if strings.Contains(part.MimeType, "multipart/alternative") {
 		for _, subPart := range part.Parts {
 			html, text := extractBodyParts(subPart)
-			if html != "" { bodyHTML = html } // Prefer HTML from subparts
-			if text != "" { bodyText = text }
+			if html != "" {
+				bodyHTML = html
+			} // Prefer HTML from subparts
+			if text != "" {
+				bodyText = text
+			}
 		}
 		// If HTML found within alternative, prioritize it
-		if bodyHTML != "" { return bodyHTML, bodyText }
+		if bodyHTML != "" {
+			return bodyHTML, bodyText
+		}
 		// If only text found within alternative, use it
-		if bodyText != "" { return "", bodyText } // Return empty HTML, non-empty Text
+		if bodyText != "" {
+			return "", bodyText
+		} // Return empty HTML, non-empty Text
 	}
 
 	// If this part is multipart/related or multipart/mixed, check children
@@ -548,16 +588,26 @@ func extractBodyParts(part *gmail.MessagePart) (bodyHTML, bodyText string) {
 		for _, subPart := range part.Parts {
 			html, text := extractBodyParts(subPart)
 			// Accumulate or prioritize? Let's prioritize the first non-empty found.
-			if bodyHTML == "" && html != "" { bodyHTML = html }
-			if bodyText == "" && text != "" { bodyText = text }
+			if bodyHTML == "" && html != "" {
+				bodyHTML = html
+			}
+			if bodyText == "" && text != "" {
+				bodyText = text
+			}
 		}
 	}
 
 	// If the current part had content, use it if we didn't find better in children
-	if bodyHTML == "" { bodyHTML = currentHTML }
-	if bodyText == "" { bodyText = currentText }
+	if bodyHTML == "" {
+		bodyHTML = currentHTML
+	}
+	if bodyText == "" {
+		bodyText = currentText
+	}
 
-    // Final check: Prefer HTML if both are somehow populated at this level
-    if bodyHTML != "" { return bodyHTML, bodyText }
+	// Final check: Prefer HTML if both are somehow populated at this level
+	if bodyHTML != "" {
+		return bodyHTML, bodyText
+	}
 	return "", bodyText // Default to text if HTML is empty
 }

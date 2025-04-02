@@ -141,24 +141,24 @@ package auth
 import (
 	"context"
 	"crm-communication-api/config"
-	graphmodel "crm-communication-api/graph/model"
-	dbmodel "crm-communication-api/internal/model"
+	graphmodel "crm-communication-api/graph/model" // Alias for graph model
+	dbmodel "crm-communication-api/internal/model" // Alias for DB model
 	"crm-communication-api/internal/repository"
 	"errors"
 	"fmt"
-	"log/slog"      // Added import
-	"net/http"    // Added import for GetGmailService signature
+	"log/slog"
+	"net/http" // Needed for GetGmailService signature
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt" // Added import for error check
+	"golang.org/x/crypto/bcrypt" // Needed for comparing bcrypt error
 )
 
 // LocalAuthService handles email/password authentication.
 type LocalAuthService struct {
-	repo          repository.AuthRepository // Use the specific interface for DB access
-	config        *config.Config
-	logger        *slog.Logger              // Added logger
-	jwtSigningKey []byte                  // Added JWT key
+	repo   repository.AuthRepository // Use the interface for DB access
+	config *config.Config
+	logger *slog.Logger
+	// No jwtSigningKey needed here, helpers use config
 }
 
 // Assert that LocalAuthService implements the Service interface
@@ -166,17 +166,11 @@ var _ Service = (*LocalAuthService)(nil)
 
 // NewLocalAuthService creates a new LocalAuthService instance.
 func NewLocalAuthService(repo repository.AuthRepository, cfg *config.Config, logger *slog.Logger) (*LocalAuthService, error) {
-	// Validate essential configuration
-	if cfg.JWTSecretKey == "" { // Check correct field name
-		return nil, ErrMissingJWTSecret
-	}
-	jwtKey := []byte(cfg.JWTSecretKey) // Use correct field name
-
+	// Basic validation could go here if needed (e.g., check if repo is nil)
 	return &LocalAuthService{
-		repo:          repo,
-		config:        cfg,
-		logger:        logger.With(slog.String("service", "LocalAuthService")), // Add context
-		jwtSigningKey: jwtKey,
+		repo:   repo,
+		config: cfg,
+		logger: logger.With(slog.String("service", "LocalAuthService")),
 	}, nil
 }
 
@@ -190,38 +184,43 @@ func (s *LocalAuthService) Login(ctx context.Context, email, password string) (*
 	if err != nil {
 		l.Warn("Login failed: user lookup error", slog.String("error", err.Error()))
 		if errors.Is(err, repository.ErrNotFound) {
-			return nil, ErrInvalidCredentials // Generic error
+			return nil, ErrInvalidCredentials // Use defined error
 		}
 		return nil, fmt.Errorf("internal error retrieving user: %w", err)
 	}
 
-	if user.PasswordHash == "" { // Check correct field name
-		l.Warn("Login attempt failed for OAuth user", slog.String("userID", user.ID.String()))
-		return nil, ErrInvalidCredentials
+	// Check if password field (containing hash) is empty
+	if user.Password == "" { // Use the correct field name 'Password' from your model
+		l.Warn("Login attempt failed for user without password hash", slog.String("userID", user.ID.String()))
+		return nil, ErrInvalidCredentials // User exists but has no password (likely OAuth only)
 	}
 
 	// Compare password using method on dbmodel.User
 	if err := user.ComparePassword(password); err != nil {
 		l.Warn("Invalid password attempt", slog.String("userID", user.ID.String()))
+		// Check for specific bcrypt mismatch error
 		if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
 			return nil, ErrInvalidCredentials
 		}
+		// Log other potential comparison errors but return generic credential error
 		l.Error("Password comparison unexpected error", slog.String("userID", user.ID.String()), slog.String("error", err.Error()))
 		return nil, ErrInvalidCredentials
 	}
 
+	// --- Authentication successful ---
+
 	// Generate tokens using package-level helpers from jwt.go
-	accessToken, err := GenerateJWT(user, "local", s.config) // Pass necessary args
+	accessToken, err := GenerateJWT(user, "local", s.config) // CORRECT Call
 	if err != nil {
 		l.Error("Failed to generate access token", slog.String("userID", user.ID.String()), slog.String("error", err.Error()))
-		return nil, fmt.Errorf("login failed during access token generation: %w", err)
+		// Don't return internal error details directly
+		return nil, fmt.Errorf("login failed: %w", ErrTokenGeneration)
 	}
 
-	// Pass repo interface to GenerateRefreshToken
-	refreshToken, err := GenerateRefreshToken(ctx, user.ID, s.repo, s.config) // Pass repo
+	refreshToken, err := GenerateRefreshToken(ctx, user.ID, s.repo, s.config) // CORRECT Call
 	if err != nil {
 		l.Error("Failed to generate refresh token", slog.String("userID", user.ID.String()), slog.String("error", err.Error()))
-		return nil, fmt.Errorf("login failed during refresh token generation: %w", err)
+		return nil, fmt.Errorf("login failed: %w", ErrTokenGeneration)
 	}
 
 	l.Info("User logged in successfully via local auth", slog.String("userID", user.ID.String()))
@@ -230,42 +229,59 @@ func (s *LocalAuthService) Login(ctx context.Context, email, password string) (*
 
 // RefreshToken uses shared logic via package-level helper.
 func (s *LocalAuthService) RefreshToken(ctx context.Context, refreshToken string) (*graphmodel.AuthPayload, error) {
-	// Pass repo interface directly to the package-level helper
-	newAccessToken, newRefreshToken, err := RefreshAccessToken(ctx, refreshToken, s.repo, s.config)
+	l := s.logger.With(slog.String("method", "RefreshToken"))
+
+	// Call package-level helper from jwt.go
+	newAccessToken, newRefreshToken, err := RefreshAccessToken(ctx, refreshToken, s.repo, s.config) // CORRECT Call
 	if err != nil {
-		return nil, err // Error is already context-rich from helper
+		// Error logging happens within RefreshAccessToken helper for critical parts
+		l.Warn("Token refresh failed", slog.String("error", err.Error()))
+		// Return specific auth errors defined in errors.go
+		if errors.Is(err, ErrRefreshTokenNotFound) || errors.Is(err, ErrRefreshTokenExpired) || errors.Is(err, ErrUserNotFound) {
+			return nil, err // Return specific, safe error
+		}
+		// Otherwise, return a generic internal error for other failures
+		return nil, fmt.Errorf("internal error during token refresh")
 	}
 
-	// Verify new token to get claims
-	claims, err := VerifyJWT(newAccessToken, s.config) // Use package-level helper
+	// Verify new token to get claims (primarily for payload user data)
+	claims, err := VerifyJWT(newAccessToken, s.config) // CORRECT Call (package-level)
 	if err != nil {
-		// This indicates a potential issue if the token generated by RefreshAccessToken is invalid
-		s.logger.Error("Failed to verify newly generated access token", slog.String("error", err.Error()))
+		l.Error("Failed to verify newly generated access token", slog.String("error", err.Error()))
 		return nil, fmt.Errorf("internal error verifying refreshed token: %w", err)
 	}
-	userID, err := uuid.Parse(claims.Subject) // Use Subject claim
+
+	// Should ideally get user from claims or re-fetch (re-fetch is safer)
+	userID, err := uuid.Parse(claims.Subject)
 	if err != nil {
-        s.logger.Error("Invalid UserID found in refreshed token claims", slog.String("subject", claims.Subject), slog.String("error", err.Error()))
-        return nil, fmt.Errorf("internal error processing refreshed token claims")
-    }
+		l.Error("Invalid UserID in refreshed token claims", slog.String("subject", claims.Subject), slog.String("error", err.Error()))
+		return nil, fmt.Errorf("internal error processing refreshed token claims")
+	}
 
-
-	// Fetch dbmodel.User
 	user, err := s.repo.GetUserByID(ctx, userID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve user during refresh: %w", err)
+		l.Error("Failed to retrieve user during refresh after verifying token", slog.String("userID", userID.String()), slog.String("error", err.Error()))
+		return nil, fmt.Errorf("failed to retrieve user data for refresh response: %w", err)
 	}
 
 	return createAuthPayload(user, newAccessToken, newRefreshToken), nil // Use helper
 }
 
 // GetCurrentUser uses context helper and repository.
+// GetCurrentUser uses context helper and repository.
 func (s *LocalAuthService) GetCurrentUser(ctx context.Context) (*dbmodel.User, error) {
 	// Use helper function defined in auth/context.go
-	userID, err := GetUserIDFromContext(ctx)
-	if err != nil {
-		s.logger.Warn("Attempted to get current user but no user ID in context", slog.String("error", err.Error()))
-		return nil, err // Propagate ErrUserNotInContext or parsing error
+	userID, ok := ContextGetUserID(ctx) // CORRECTED function name call
+	if !ok {
+		// Error retrieving or parsing user ID from context claims
+		s.logger.WarnContext(ctx, "GetCurrentUser: could not get valid user ID from context")
+		// Return ErrUserNotInContext if claims were missing, or a different error if parsing failed
+		// Check claims directly for better error message
+		_, claimsOk := ContextGetClaims(ctx)
+		if !claimsOk {
+			return nil, ErrUserNotInContext
+		}
+		return nil, fmt.Errorf("invalid user ID format in context claims")
 	}
 
 	user, err := s.repo.GetUserByID(ctx, userID)
@@ -279,11 +295,10 @@ func (s *LocalAuthService) GetCurrentUser(ctx context.Context) (*dbmodel.User, e
 	return user, nil
 }
 
-// VerifyJWT delegates to the package-level helper in jwt.go
+// VerifyJWT implements the Service interface method by calling the package-level helper.
 func (s *LocalAuthService) VerifyJWT(tokenString string) (*Claims, error) {
-    return VerifyJW(tokenString, s.config)
+	return VerifyJWT(tokenString, s.config) // CORRECT Call (package-level helper)
 }
-
 
 // --- Google Specific Methods (Stubs for LocalAuthService) ---
 
@@ -296,21 +311,5 @@ func (s *LocalAuthService) GetAuthCodeURL() string {
 }
 
 func (s *LocalAuthService) GetGmailService(ctx context.Context, userID string) (*http.Client, error) {
-    return nil, fmt.Errorf("local auth service cannot provide Gmail service client")
-}
-
-// createAuthPayload is a helper common to different auth methods
-func createAuthPayload(user *dbmodel.User, accessToken, refreshToken string) *graphmodel.AuthPayload {
-	return &graphmodel.AuthPayload{
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		User: &graphmodel.User{
-			ID:     user.ID.String(),
-			Name:   user.Name,
-			Email:  user.Email,
-			Avatar: &user.Avatar,
-			Role:   user.Role,
-			// Add CreatedAt/UpdatedAt if they exist in graphmodel.User
-		},
-	}
+	return nil, fmt.Errorf("local auth service cannot provide Gmail service client")
 }

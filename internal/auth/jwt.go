@@ -151,10 +151,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"log/slog" // Using slog for logging within the package where necessary
+	"log/slog"
 	"time"
 
 	"crm-communication-api/config"
+	graphmodel "crm-communication-api/graph/model"
 	dbmodel "crm-communication-api/internal/model" // Alias for database models
 	"crm-communication-api/internal/repository"
 
@@ -163,35 +164,35 @@ import (
 )
 
 // Claims represents the structure of the JWT claims.
+// It's defined here as it's tightly coupled with JWT generation/verification.
 type Claims struct {
-	jwt.RegisteredClaims             // Standard claims (sub, iss, aud, exp, nbf, iat, jti)
-	Email                string `json:"email"`          // Custom claim: User's email
-	Role                 string `json:"role"`           // Custom claim: User's role
-	AuthProvider         string `json:"auth_provider"`  // Custom claim: How the user authenticated (local, google)
-	Name                 string `json:"name"`           // Custom claim: User's name
+	jwt.RegisteredClaims        // Standard claims (sub, iss, aud, exp, nbf, iat, jti)
+	Email                string `json:"email"`         // Custom claim: User's email
+	Role                 string `json:"role"`          // Custom claim: User's role
+	AuthProvider         string `json:"auth_provider"` // Custom claim: How the user authenticated (local, google)
+	Name                 string `json:"name"`          // Custom claim: User's name
 }
 
-// --- JWT Access Token Functions ---
+// --- JWT Access Token Helper Functions ---
 
 // GenerateJWT creates a new JWT access token for a user.
 // Accepts the database user model, provider string, and application config.
-
 func GenerateJWT(user *dbmodel.User, authProvider string, cfg *config.Config) (string, error) {
 	if cfg.JWTSecretKey == "" {
 		slog.Error("JWT generation failed: JWT_SECRET_KEY is not configured")
 		return "", ErrMissingJWTSecret
 	}
 	jwtKey := []byte(cfg.JWTSecretKey)
-	// Use cfg.JWTExpiry (time.Duration) directly
+	// Use cfg.JWTExpiry (time.Duration) directly from config struct
 	expirationTime := time.Now().Add(cfg.JWTExpiry)
 
 	claims := &Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   user.ID.String(),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			ExpiresAt: jwt.NewNumericDate(expirationTime),
-			Issuer:    cfg.JWTIssuer, // <-- USE CONFIG VALUE
-			NotBefore: jwt.NewNumericDate(time.Now().Add(-1 * time.Minute)),
+			Subject:   user.ID.String(),                                     // Standard 'sub' claim is user ID
+			IssuedAt:  jwt.NewNumericDate(time.Now()),                       // Standard 'iat' claim
+			ExpiresAt: jwt.NewNumericDate(expirationTime),                   // Standard 'exp' claim
+			Issuer:    cfg.JWTIssuer,                                        // Standard 'iss' claim from config
+			NotBefore: jwt.NewNumericDate(time.Now().Add(-1 * time.Minute)), // Optional: Allow for slight clock skew
 		},
 		Email:        user.Email,
 		Role:         user.Role,
@@ -205,9 +206,10 @@ func GenerateJWT(user *dbmodel.User, authProvider string, cfg *config.Config) (s
 		slog.Error("Failed to sign JWT", slog.String("error", err.Error()), slog.String("userID", user.ID.String()))
 		return "", fmt.Errorf("%w: could not sign token: %v", ErrTokenGeneration, err)
 	}
-	slog.Debug("JWT generated successfully", slog.String("userID", user.ID.String()))
+	// slog.Debug("JWT generated successfully", slog.String("userID", user.ID.String())) // Keep logs in service layer generally
 	return signedToken, nil
 }
+
 // VerifyJWT validates a JWT string using the application config and returns the claims if valid.
 func VerifyJWT(tokenString string, cfg *config.Config) (*Claims, error) {
 	if cfg.JWTSecretKey == "" {
@@ -217,45 +219,42 @@ func VerifyJWT(tokenString string, cfg *config.Config) (*Claims, error) {
 	jwtKey := []byte(cfg.JWTSecretKey)
 
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		// Ensure the signing method is HMAC as expected
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
 		return jwtKey, nil
 	})
 
-	// Handle parsing errors (expired, malformed, signature invalid etc.)
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
-			slog.Debug("JWT verification failed: token expired")
+			// slog.Debug("JWT verification failed: token expired") // Log in calling function if needed
 			return nil, ErrTokenExpired
 		}
-		slog.Warn("JWT verification failed: invalid token", slog.String("error", err.Error()))
+		// slog.Warn("JWT verification failed: invalid token", slog.String("error", err.Error()))
 		return nil, fmt.Errorf("%w: %v", ErrTokenInvalid, err) // Wrap specific parse error
 	}
 
-	// Check if the token and claims are valid
 	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
-		slog.Debug("JWT verified successfully", slog.String("userID", claims.Subject))
+		// slog.Debug("JWT verified successfully", slog.String("userID", claims.Subject))
 		return claims, nil
 	}
 
-	slog.Warn("JWT token was parsed but marked invalid")
+	// slog.Warn("JWT token was parsed but marked invalid")
 	return nil, ErrTokenInvalid
 }
 
-// --- Refresh Token Functions ---
+// --- Refresh Token Helper Functions ---
 
 // GenerateRefreshToken creates, stores via repository, and returns a new secure refresh token string.
 func GenerateRefreshToken(ctx context.Context, userID uuid.UUID, repo repository.AuthRepository, cfg *config.Config) (string, error) {
-	// Generate a cryptographically secure random token string (UUID is generally sufficient for uniqueness here)
-	tokenString := uuid.NewString() // Using UUID as the refresh token identifier
+	tokenString := uuid.NewString() // Using UUID string as the refresh token identifier
 
-	expiresAt := time.Now().Add(cfg.RefreshTokenExpiry) // Use RefreshTokenExpiry directly
+	// Use cfg.RefreshTokenExpiry (time.Duration) directly
+	expiresAt := time.Now().Add(cfg.RefreshTokenExpiry)
 
 	refreshToken := &dbmodel.RefreshToken{
 		UserID:    userID,
-		Token:     tokenString, // Store the UUID string as the token
+		Token:     tokenString,
 		ExpiresAt: expiresAt,
 	}
 
@@ -270,14 +269,14 @@ func GenerateRefreshToken(ctx context.Context, userID uuid.UUID, repo repository
 
 // RefreshAccessToken validates a refresh token, rotates it, and issues a new pair of access/refresh tokens.
 func RefreshAccessToken(ctx context.Context, refreshTokenString string, repo repository.AuthRepository, cfg *config.Config) (newAccessToken string, newRefreshToken string, err error) {
-	l := slog.Default().With(slog.String("method", "RefreshAccessToken")) // Get default logger
+	l := slog.Default().With(slog.String("function", "RefreshAccessToken")) // Use default logger for helpers
 	l.DebugContext(ctx, "Attempting to refresh access token")
 
 	if refreshTokenString == "" {
 		return "", "", ErrMissingRefreshToken
 	}
 
-	// 1. Find the refresh token (assumes FindRefreshToken doesn't check expiry)
+	// 1. Find the refresh token
 	refreshToken, err := repo.FindRefreshToken(ctx, refreshTokenString)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
@@ -291,17 +290,13 @@ func RefreshAccessToken(ctx context.Context, refreshTokenString string, repo rep
 	// 2. Delete the used token *immediately* (Rotation Step 1)
 	if delErr := repo.DeleteRefreshToken(ctx, refreshToken.ID); delErr != nil {
 		l.ErrorContext(ctx, "CRITICAL: Failed to delete used refresh token", slog.String("tokenID", refreshToken.ID.String()), slog.String("error", delErr.Error()))
-		// Security critical: If we can't delete the old token, we MUST NOT proceed.
-		// Returning an error forces re-authentication.
-		return "", "", fmt.Errorf("failed to invalidate used refresh token: %w", delErr)
-	} else {
-		l.DebugContext(ctx, "Used refresh token deleted", slog.String("tokenID", refreshToken.ID.String()))
+		return "", "", fmt.Errorf("failed to invalidate used refresh token: %w", delErr) // Fail hard if delete fails
 	}
+	l.DebugContext(ctx, "Used refresh token deleted", slog.String("tokenID", refreshToken.ID.String()))
 
-	// 3. Check if the retrieved token *was* expired (even though deleted now)
+	// 3. Check if the retrieved token *was* expired
 	if time.Now().After(refreshToken.ExpiresAt) {
 		l.WarnContext(ctx, "Attempted to use expired refresh token", slog.String("userID", refreshToken.UserID.String()))
-		// Even though deleted, the original attempt was with an expired token.
 		return "", "", ErrRefreshTokenExpired
 	}
 
@@ -310,9 +305,9 @@ func RefreshAccessToken(ctx context.Context, refreshTokenString string, repo rep
 	if err != nil {
 		l.ErrorContext(ctx, "Failed to get user associated with refresh token", slog.String("userID", refreshToken.UserID.String()), slog.String("error", err.Error()))
 		if errors.Is(err, repository.ErrNotFound) {
-			return "", "", ErrUserNotFound // User deleted since token was issued
+			return "", "", ErrUserNotFound
 		}
-		return "", "", ErrGetUserInfo // Internal error getting user
+		return "", "", ErrGetUserInfo
 	}
 
 	// 5. Determine original AuthProvider for the new JWT
@@ -327,35 +322,38 @@ func RefreshAccessToken(ctx context.Context, refreshTokenString string, repo rep
 	// 6. Generate new access token
 	newAccessToken, err = GenerateJWT(user, authProvider, cfg)
 	if err != nil {
-		// No need to log here, GenerateJWT handles it.
 		return "", "", fmt.Errorf("failed to generate new access token: %w", err)
 	}
 
 	// 7. Generate a *new* refresh token (Rotation Step 2)
 	newRefreshToken, err = GenerateRefreshToken(ctx, user.ID, repo, cfg)
 	if err != nil {
-		// CRITICAL: Old token deleted, new access token generated, but failed to create new refresh token.
-		// User can use the API until access token expires but cannot refresh again.
 		l.ErrorContext(ctx, "CRITICAL: Failed to generate new refresh token after deleting old one", slog.String("userID", user.ID.String()), slog.String("error", err.Error()))
-		// Force re-login by returning an error.
-		return "", "", fmt.Errorf("failed to complete token refresh cycle: %w", err)
+		return "", "", fmt.Errorf("failed to complete token refresh cycle: %w", err) // Force re-login
 	}
 
 	l.InfoContext(ctx, "Access token refreshed successfully", slog.String("userID", user.ID.String()))
 	return newAccessToken, newRefreshToken, nil
 }
 
-// generateSecureRandomString generates a cryptographically secure random string encoded in base64.
-// Note: Using uuid.NewString() in GenerateRefreshToken is simpler and generally sufficient for uniqueness.
-// This helper is kept if a different format is desired.
+// generateSecureRandomString - kept if needed for other purposes, but UUID is fine for refresh token
 func generateSecureRandomString(length int) (string, error) {
-	byteLength := (length * 6) / 8 // Estimate bytes needed for base64 length
+	byteLength := (length * 6) / 8
 	if (length*6)%8 != 0 {
-		byteLength++ // Add padding if not perfectly divisible
+		byteLength++
 	}
 	randomBytes := make([]byte, byteLength)
 	if _, err := rand.Read(randomBytes); err != nil {
 		return "", fmt.Errorf("failed to generate random bytes: %w", err)
 	}
-	return base64.URLEncoding.EncodeToString(randomBytes)[:length], nil // Trim to exact length
+	return base64.URLEncoding.EncodeToString(randomBytes)[:length], nil
+}
+
+// createAuthPayload is a helper to create the GraphQL response payload
+func createAuthPayload(user *dbmodel.User, accessToken, refreshToken string) *graphmodel.AuthPayload {
+	return &graphmodel.AuthPayload{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		User:         user, // CORRECTED: Assign the *dbmodel.User directly, as it's bound to the GraphQL User type
+	}
 }

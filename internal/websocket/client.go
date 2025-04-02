@@ -2,7 +2,8 @@
 package websocket
 
 import (
-	"crm-communication-api/internal/middleware"
+	// "crm-communication-api/internal/middleware"
+	"crm-communication-api/internal/auth"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -151,9 +152,9 @@ func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get User ID from context
-	userID, err := middleware.GetUserIDFromContext(r.Context())
+	userID, ok := auth.ContextGetUserID(r.Context())
 	var id string
-	if err != nil {
+	if !ok {
 		id = uuid.NewString() // Generate a unique ID for the client
 	} else {
 		id = userID.String()

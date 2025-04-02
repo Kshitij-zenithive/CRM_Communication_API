@@ -249,6 +249,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	// "time"
 
@@ -275,6 +276,7 @@ type AuthRepository interface {
 	DeleteRefreshToken(ctx context.Context, id uuid.UUID) error // Changed param to ID
 	GetOAuthProvider(ctx context.Context, userID uuid.UUID, provider string) (*dbmodel.OAuthProvider, error)
 	CreateOrUpdateOAuthProvider(ctx context.Context, provider *dbmodel.OAuthProvider) error // Upsert logic
+	DeleteExpiredRefreshTokens(ctx context.Context) error
 }
 
 // ConversationRepository defines methods for conversation data access.
@@ -398,6 +400,16 @@ func (r *Repository) UpdateUser(ctx context.Context, user *dbmodel.User) error {
 	}
 	return nil
 }
+
+// GetAllUsers retrieves all users (consider pagination for production).
+func (r *Repository) GetAllUsers(ctx context.Context) ([]dbmodel.User, error) {
+	var users []dbmodel.User
+	err := r.db.WithContext(ctx).Find(&users).Error // Simple find all for now
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all users: %w", err)
+	}
+	return users, nil
+}
 func (r *Repository) CreateRefreshToken(ctx context.Context, token *dbmodel.RefreshToken) error {
 	err := r.db.WithContext(ctx).Create(token).Error
 	if err != nil {
@@ -447,6 +459,23 @@ func (r *Repository) CreateOrUpdateOAuthProvider(ctx context.Context, provider *
 	if err != nil {
 		return fmt.Errorf("failed to create or update oauth provider: %w", err)
 	}
+	return nil
+}
+
+// DeleteExpiredRefreshTokens removes refresh tokens that have passed their expiry time.
+func (r *Repository) DeleteExpiredRefreshTokens(ctx context.Context) error {
+	now := time.Now()
+	result := r.db.WithContext(ctx).
+		Where("expires_at < ?", now).
+		Delete(&dbmodel.RefreshToken{}) // Delete based on the model type and condition
+
+	if result.Error != nil {
+		// Log error if logger is available
+		// r.logger.ErrorContext(ctx, "Database error deleting expired refresh tokens", slog.String("error", result.Error.Error()))
+		return fmt.Errorf("failed to delete expired refresh tokens: %w", result.Error)
+	}
+	// Log number of deleted tokens if logger is available
+	// r.logger.InfoContext(ctx, "Expired refresh token cleanup complete", slog.Int64("deleted_count", result.RowsAffected))
 	return nil
 }
 

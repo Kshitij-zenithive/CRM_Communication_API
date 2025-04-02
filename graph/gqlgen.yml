@@ -1,37 +1,69 @@
+# graph/gqlgen.yml
+# Configuration for gqlgen (https://gqlgen.com/)
+
 schema:
-  - schema.graphqls
+  - schema.graphqls # Use wildcard if you have multiple: - "*.graphqls"
 
+# Executable Schema Generation
 exec:
-  filename: generated/generated.go
-  package: generated
+  filename: generated/generated.go # Relative path to output file (graph/generated/generated.go)
+  package: generated             # Go package name for this generated file
+# REMOVE invalid options from exec:
+#  layout: follow-schema
+#  dir: /generated
 
+# Generated Models (Input types, etc.)
 model:
-  filename: model/models_gen.go
-  package: model
+  filename: model/models_gen.go # Relative path to output file (graph/model/models_gen.go)
+  package: model                # Go package name for these generated models
 
+# Resolver Configuration
 resolver:
-  layout: follow-schema
-  dir: .
-  package: graph
-  filename_template: "{name}.resolvers.go"
+  layout: follow-schema # Use follow-schema (generates query.resolvers.go, etc.)
+  dir: resolver              # Generate resolver files in the CURRENT directory (graph/)
+  package: resolver        # Go package for the resolver files (must match the directory)
+  # filename: schema.resolvers.go # NOT used with follow-schema
+  filename_template: "{name}.resolvers.go" # Naming convention for generated files
+  type: Resolver      # Name of your root resolver struct in graph/resolver.go
 
 autobind:
- - "crm-communication-api/internal/model"
+  - "crm-communication-api/internal/model"
 
 models:
   ID:
     model:
       - github.com/99designs/gqlgen/graphql.ID
-      - github.com/99designs/gqlgen/graphql.Int
-      - github.com/99designs/gqlgen/graphql.Int64
-      - github.com/99designs/gqlgen/graphql.Int32
   Int:
     model:
-      - github.com/99designs/gqlgen/graphql.Int
-      - github.com/99designs/gqlgen/graphql.Int64
-      - github.com/99designs/gqlgen/graphql.Int32
-  # Add mapping for Time scalar (very important)
+      - github.com/99designs/gqlgen/graphql.Int # Map to Go's standard int
+
+  # Custom Scalars
   Time:
-    model: "crm-communication-api/graph/model.Time"
+    model:
+      - crm-communication-api/graph/model.Time
   JSON:
-    model: "crm-communication-api/graph/model.JSON"
+    model:
+      - crm-communication-api/graph/model.JSON
+
+  # Explicit Object Mapping (Redundant if autobind works, but explicit)
+  User:
+    model: crm-communication-api/internal/model.User
+  Client:
+    model: crm-communication-api/internal/model.Client
+  Conversation:
+    model: crm-communication-api/internal/model.Conversation
+  ConversationParticipant:
+    model: crm-communication-api/internal/model.ConversationParticipant
+  Message:
+    model: crm-communication-api/internal/model.Message
+  Email:
+    model: crm-communication-api/internal/model.Email
+  EmailAttachment:
+    model: crm-communication-api/internal/model.EmailAttachment
+  EmailTemplate:
+    model: crm-communication-api/internal/model.EmailTemplate
+  TimelineEvent: # Assuming model exists
+    model: crm-communication-api/internal/model.TimelineEvent
+
+# Optional settings
+# skip_complexity: true # Good for starting out, but not recommended for production
