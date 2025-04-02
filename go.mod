@@ -3,16 +3,18 @@ module crm-communication-api
 go 1.24.1
 
 require (
-	github.com/99designs/gqlgen v0.17.68
-	github.com/golang-jwt/jwt/v4 v4.5.2
+	github.com/99designs/gqlgen v0.17.70
+	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
 	github.com/joho/godotenv v1.5.1
+	github.com/lib/pq v1.10.9
 	github.com/rs/cors v1.11.1
 	github.com/vektah/gqlparser/v2 v2.5.23
 	golang.org/x/crypto v0.36.0
 	golang.org/x/oauth2 v0.28.0
 	google.golang.org/api v0.227.0
+	gorm.io/datatypes v1.2.5
 	gorm.io/driver/postgres v1.5.11
 	gorm.io/gorm v1.25.12
 )
@@ -20,15 +22,10 @@ require (
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/agnivade/levenshtein v1.2.1 // indirect
-	github.com/go-chi/chi v1.5.5 // indirect
-	github.com/go-chi/chi/v5 v5.2.1 // indirect
 	github.com/go-sql-driver/mysql v1.8.1 // indirect
 	github.com/go-viper/mapstructure/v2 v2.2.1 // indirect
-	github.com/golang-jwt/jwt/v5 v5.2.2 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
-	github.com/lib/pq v1.10.9 // indirect
 	github.com/sosodev/duration v1.3.1 // indirect
-	gorm.io/datatypes v1.2.5 // indirect
 	gorm.io/driver/mysql v1.5.6 // indirect
 )
 

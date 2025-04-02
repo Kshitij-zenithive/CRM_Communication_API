@@ -240,6 +240,19 @@ type TimelineEvent struct {
 	// User        User     `gorm:"foreignKey:UserID" json:"user"`
 	// Client      *Client  `gorm:"foreignKey:ClientID" json:"client,omitempty"`
 }
+type InteractionType string
+
+const (
+	InteractionTypeChatMessage         InteractionType = "MESSAGE_SENT" // Renamed for clarity
+	InteractionTypeEmailSent           InteractionType = "EMAIL_SENT"
+	InteractionTypeEmailReceived       InteractionType = "EMAIL_RECEIVED"
+	InteractionTypeConversationCreated InteractionType = "CONVERSATION_CREATED"
+	InteractionTypeParticipantAdded    InteractionType = "PARTICIPANT_ADDED"
+	InteractionTypeParticipantRemoved  InteractionType = "PARTICIPANT_REMOVED"
+	InteractionTypeReminderSet         InteractionType = "REMINDER_SET" // For when a reminder command is processed
+	InteractionTypeTaskCreated         InteractionType = "TASK_CREATED" // If/when task commands are added
+	// Add other specific event types as needed
+)
 
 // BeforeCreate hook for TimelineEvent (if needed, UUID handled by default)
 func (te *TimelineEvent) BeforeCreate(tx *gorm.DB) (err error) {

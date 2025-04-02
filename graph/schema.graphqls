@@ -2,13 +2,9 @@
 
 # --- Custom Scalars ---
 scalar Time   # Represents a time value, likely RFC3339 format
-scalar UUID   # Represents a UUID, often string format but distinct type
-scalar JSON # Optional: Define if we want strongly-typed JSON handling for metadata
-              # Let's use String for metadata for simplicity initially.
+scalar JSON   # Represents a JSON object/value
 
 # --- Enums ---
-# Based on internal/model/models.go enums
-
 enum ConversationType {
   DIRECT  # DM between internal users
   GROUP   # Group chat between internal users
@@ -16,10 +12,10 @@ enum ConversationType {
 }
 
 enum MessageType {
-  TEXT           # Standard user-generated text message
-  SYSTEM         # System notification (e.g., user joined)
-  COMMAND_OUTPUT # Output/confirmation from a slash command
-  EMAIL_IN_THREAD # Represents an email shown within the chat timeline
+  TEXT
+  SYSTEM
+  COMMAND_OUTPUT
+  EMAIL_IN_THREAD
 }
 
 enum EmailDirection {
@@ -28,17 +24,15 @@ enum EmailDirection {
 }
 
 # --- Core Object Types ---
-# Based on internal/model structs
 
 type User {
-  id: ID!             # Changed from UUID to ID for GraphQL convention
+  id: ID!
   name: String!
   email: String!
-  avatar: String        # URL or path
+  avatar: String
   role: String!
   createdAt: Time!
   updatedAt: Time!
-  # conversations: [Conversation!] # Might be fetched via a dedicated query if too many
 }
 
 type Client {
@@ -48,55 +42,49 @@ type Client {
   company: String
   createdAt: Time!
   updatedAt: Time!
-  # conversations: [Conversation!] # Might be fetched via a dedicated query
-  # emails: [Email!]             # Might be fetched via a dedicated query
 }
 
 type Conversation {
   id: ID!
   type: ConversationType!
-  name: String           # Optional name, primarily for group chats
-  clientId: ID           # Link to Client ID if it's a client-specific conversation
+  name: String
+  clientId: ID # Link to Client ID
   createdAt: Time!
   updatedAt: Time!
 
   # Relations
-  participants: [ConversationParticipant!]! # List of users participating
+  participants: [ConversationParticipant!]!
   messages(pagination: PaginationInput): MessageConnection # Paginated messages
-  client: Client           # The associated client, if applicable
-  # lastMessage: Message     # Optional: Often useful to show last message snippet
+  client: Client # Populated if clientId is not null
 }
 
-# Links users to conversations
 type ConversationParticipant {
-  # id: ID! # Removed in Go model, using composite key. Expose User directly.
   user: User!
   joinedAt: Time!
-  # conversation: Conversation! # Avoid circular dependencies or fetch separately
 }
 
 type Message {
   id: ID!
-  conversationId: ID!
-  sender: User!          # The user who sent the message
+  conversationId: ID! # ID of the conversation it belongs to
+  sender: User!
   content: String!
   type: MessageType!
-  metadata: JSON       
+  metadata: JSON # Flexible field for command output, email links etc.
   createdAt: Time!
   updatedAt: Time!
-  conversation: Conversation! # Avoid circular dependencies or fetch separately
+  # readBy: [User!] # Add back if/when read receipts are fully implemented
 }
 
 type Email {
   id: ID!
-  clientId: ID           # Nullable client link
-  userId: ID!            # Internal user associated
-  provider: String       # e.g., "gmail", "manual"
-  providerId: String     # ID from the source system
-  threadId: String       # Provider's thread ID
+  clientId: ID # Nullable client link
+  userId: ID! # Internal user associated
+  provider: String # e.g., "gmail", "manual"
+  providerId: String # ID from the source system
+  threadId: String
   subject: String
   from: String!
-  to: [String!]!         # List of To recipients
+  to: [String!]!
   cc: [String!]
   bcc: [String!]
   bodyHtml: String
@@ -111,19 +99,16 @@ type Email {
 
   # Relations
   attachments: [EmailAttachment!]
-  client: Client
-  # user: User! # Maybe redundant if userId is present? Or useful for direct access? Let's keep it for now.
-  user: User!
+  client: Client # Populated if clientId is not null
+  user: User! # The internal user this email is associated with
 }
 
 type EmailAttachment {
   id: ID!
-  # emailId: ID! # Parent email is context
   filename: String!
   mimeType: String
-  size: Int! # GraphQL Int is typically 32-bit, check if size can exceed this. Use Float or String if needed, or define Int64 scalar. Let's assume Int is ok for now.
-  # storagePath: String! # Internal detail, not exposed
-  downloadUrl: String # Optional: Provide a temporary URL to download
+  size: Int! # Assuming size fits in 32-bit Int
+  downloadUrl: String # Optional presigned URL
   createdAt: Time!
 }
 
@@ -131,10 +116,16 @@ type EmailTemplate {
   id: ID!
   name: String!
   subject: String!
-  body: String! # HTML or text, with placeholders
+  body: String!
   createdAt: Time!
   updatedAt: Time!
 }
+type AuthPayload {
+  accessToken: String!
+  refreshToken: String! # Client receives this but typically stores it securely (e.g., httpOnly cookie)
+  user: User!
+}
+
 
 # --- Input Types ---
 
@@ -144,8 +135,8 @@ input ClientFilterInput {
 }
 
 input ConversationFilterInput {
-  userId: ID       # Filter by participant user ID
-  clientId: ID     # Filter by associated client ID
+  userId: ID
+  clientId: ID
   type: ConversationType
 }
 
@@ -154,7 +145,7 @@ input EmailFilterInput {
   userId: ID
   subjectContains: String
   from: String
-  toContains: String # Filter if email address is in 'to' list
+  toContains: String
   direction: EmailDirection
   isRead: Boolean
   after: Time
@@ -163,21 +154,22 @@ input EmailFilterInput {
 
 input PaginationInput {
   first: Int
-  after: String  # Cursor for cursor-based pagination
-  last: Int      # For backward pagination (optional)
-  before: String # Cursor for backward pagination (optional)
+  after: String
+  last: Int
+  before: String
 }
 
+# Refined SendEmailInput
 input SendEmailInput {
-  clientId: ID           # Optional client to associate with
+  clientId: ID         # Optional client association ID
   to: [String!]!
   cc: [String!]
   bcc: [String!]
-  subject: String!
-  bodyHtml: String
-  bodyText: String
+  subject: String        # Optional if templateId is provided
+  bodyHtml: String       # Optional if templateId is provided
+  bodyText: String       # Optional if templateId is provided
   templateId: ID         # Optional template to use
-  templateData: String   # Optional JSON string for template variables
+  templateData: JSON     # Optional JSON object for template variables
 }
 
 input CreateClientInput {
@@ -196,8 +188,8 @@ input UpdateClientInput {
 input CreateConversationInput {
     type: ConversationType!
     name: String       # Required for GROUP type
-    clientId: ID       # Required for CLIENT type
-    participantUserIds: [ID!]! # Initial list of user IDs
+    clientId: ID       # Optional for CLIENT type (can be linked later?) - Make required for CLIENT type? Let's keep optional for now.
+    participantUserIds: [ID!]! # List of user IDs (must include self?)
 }
 
 input CreateEmailTemplateInput {
@@ -213,8 +205,16 @@ input UpdateEmailTemplateInput {
     body: String
 }
 
+# Added for Auth
+input NewUserInput {
+  name: String!
+  email: String!
+  password: String!
+  avatar: String
+  role: String # Optional: Default to 'user'
+}
 
-# --- Connection Types for Pagination ---
+# --- Connection Types ---
 
 type PageInfo {
   hasNextPage: Boolean!
@@ -231,7 +231,7 @@ type MessageEdge {
 type MessageConnection {
   edges: [MessageEdge!]!
   pageInfo: PageInfo!
-  totalCount: Int # Optional: Total count of messages in the conversation
+  totalCount: Int
 }
 
 type EmailEdge {
@@ -242,27 +242,28 @@ type EmailEdge {
 type EmailConnection {
     edges: [EmailEdge!]!
     pageInfo: PageInfo!
-    totalCount: Int # Optional: Total count matching filter
+    totalCount: Int
 }
-
 
 # --- Root Operations ---
 
 type Query {
+  # Auth Query
+  me: User! # Get current authenticated user
+
   # User Queries
   user(id: ID!): User
-  users(filter: ClientFilterInput, pagination: PaginationInput): [User!]! # Simple list for now, add connection later if needed
+  users(filter: ClientFilterInput, pagination: PaginationInput): [User!]! # Simple list
 
   # Client Queries
   client(id: ID!): Client
-  clients(filter: ClientFilterInput, pagination: PaginationInput): [Client!]! # Simple list for now
+  clients(filter: ClientFilterInput, pagination: PaginationInput): [Client!]! # Simple list
 
   # Conversation Queries
   conversation(id: ID!): Conversation
-  conversations(filter: ConversationFilterInput, pagination: PaginationInput): [Conversation!]! # Simple list for now
+  conversations(filter: ConversationFilterInput, pagination: PaginationInput): [Conversation!]! # Simple list
 
-  # Message Queries (scoped to conversation)
-  # messages field is on Conversation type
+  # Message Queries -> Field on Conversation type
 
   # Email Queries
   email(id: ID!): Email
@@ -274,22 +275,28 @@ type Query {
 }
 
 type Mutation {
+  # Auth Mutations
+  login(email: String!, password: String!): AuthPayload!
+  googleLogin(code: String!): AuthPayload!
+  refreshToken(refreshToken: String!): AuthPayload!
+  createUser(input: NewUserInput!): User! # Added back
+
   # Client Mutations
   createClient(input: CreateClientInput!): Client!
   updateClient(input: UpdateClientInput!): Client!
-  # deleteClient(id: ID!): Boolean! # Add if needed
 
   # Conversation Mutations
   createConversation(input: CreateConversationInput!): Conversation!
-  addParticipant(conversationId: ID!, userId: ID!): ConversationParticipant! # Returns the participant link
-  removeParticipant(conversationId: ID!, userId: ID!): Boolean! # Returns success status
+  addParticipant(conversationId: ID!, userId: ID!): ConversationParticipant!
+  removeParticipant(conversationId: ID!, userId: ID!): Boolean!
 
   # Message Mutations
-  sendMessage(conversationId: ID!, content: String!): Message! # Resolver handles command parsing
+  sendMessage(conversationId: ID!, content: String!): Message!
+  markMessageAsRead(messageId: ID!): Boolean! # Added back
 
   # Email Mutations
   sendEmail(input: SendEmailInput!): Email!
-  # updateEmailStatus(id: ID!, isRead: Boolean): Email! # Example status update
+  syncGmail: Boolean! # Added back
 
   # Email Template Mutations
   createEmailTemplate(input: CreateEmailTemplateInput!): EmailTemplate!
@@ -299,5 +306,5 @@ type Mutation {
 
 type Subscription {
   newMessage(conversationId: ID!): Message!
-  conversationUpdated(conversationId: ID!): Conversation! # For participant changes, name changes etc.
+  conversationUpdated(conversationId: ID!): Conversation!
 }

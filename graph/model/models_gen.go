@@ -12,57 +12,71 @@ type AuthPayload struct {
 	User         *model.User `json:"user"`
 }
 
-type Mutation struct {
+type ClientFilterInput struct {
+	NameContains *string `json:"nameContains,omitempty"`
+	Email        *string `json:"email,omitempty"`
 }
 
-type NewClientInput struct {
+type ConversationFilterInput struct {
+	UserID   *string                 `json:"userId,omitempty"`
+	ClientID *string                 `json:"clientId,omitempty"`
+	Type     *model.ConversationType `json:"type,omitempty"`
+}
+
+type CreateClientInput struct {
 	Name    string  `json:"name"`
 	Email   string  `json:"email"`
 	Company *string `json:"company,omitempty"`
 }
 
-type NewConversationInput struct {
-	Type     string   `json:"type"`
-	Name     *string  `json:"name,omitempty"`
-	ClientID *string  `json:"clientId,omitempty"`
-	UserIds  []string `json:"userIds"`
+type CreateConversationInput struct {
+	Type               model.ConversationType `json:"type"`
+	Name               *string                `json:"name,omitempty"`
+	ClientID           *string                `json:"clientId,omitempty"`
+	ParticipantUserIds []string               `json:"participantUserIds"`
 }
 
-type NewEmailInput struct {
-	From    string   `json:"from"`
-	To      []string `json:"to"`
-	Subject string   `json:"subject"`
-	Body    string   `json:"body"`
-}
-
-type NewEmailTemplateInput struct {
+type CreateEmailTemplateInput struct {
 	Name    string `json:"name"`
 	Subject string `json:"subject"`
 	Body    string `json:"body"`
 }
 
-type NewEmailWithTemplateInput struct {
-	To           []string `json:"to"`
-	TemplateID   string   `json:"templateId"`
-	TemplateData JSON     `json:"templateData"`
+type EmailConnection struct {
+	Edges      []*EmailEdge `json:"edges"`
+	PageInfo   *PageInfo    `json:"pageInfo"`
+	TotalCount *int         `json:"totalCount,omitempty"`
 }
 
-type NewMessageInput struct {
-	Content        string `json:"content"`
-	ConversationID string `json:"conversationId"`
+type EmailEdge struct {
+	Cursor string       `json:"cursor"`
+	Node   *model.Email `json:"node"`
 }
 
-type NewReminderInput struct {
-	Content  string `json:"content"`
-	RemindAt Time   `json:"remindAt"`
+type EmailFilterInput struct {
+	ClientID        *string               `json:"clientId,omitempty"`
+	UserID          *string               `json:"userId,omitempty"`
+	SubjectContains *string               `json:"subjectContains,omitempty"`
+	From            *string               `json:"from,omitempty"`
+	ToContains      *string               `json:"toContains,omitempty"`
+	Direction       *model.EmailDirection `json:"direction,omitempty"`
+	IsRead          *bool                 `json:"isRead,omitempty"`
+	After           *Time                 `json:"after,omitempty"`
+	Before          *Time                 `json:"before,omitempty"`
 }
 
-type NewTaskInput struct {
-	Title       string  `json:"title"`
-	Description *string `json:"description,omitempty"`
-	AssignedTo  string  `json:"assignedTo"`
-	DueDate     *Time   `json:"dueDate,omitempty"`
-	ClientID    *string `json:"clientId,omitempty"`
+type MessageConnection struct {
+	Edges      []*MessageEdge `json:"edges"`
+	PageInfo   *PageInfo      `json:"pageInfo"`
+	TotalCount *int           `json:"totalCount,omitempty"`
+}
+
+type MessageEdge struct {
+	Cursor string         `json:"cursor"`
+	Node   *model.Message `json:"node"`
+}
+
+type Mutation struct {
 }
 
 type NewUserInput struct {
@@ -73,29 +87,48 @@ type NewUserInput struct {
 	Role     *string `json:"role,omitempty"`
 }
 
+type PageInfo struct {
+	HasNextPage     bool    `json:"hasNextPage"`
+	HasPreviousPage bool    `json:"hasPreviousPage"`
+	StartCursor     *string `json:"startCursor,omitempty"`
+	EndCursor       *string `json:"endCursor,omitempty"`
+}
+
+type PaginationInput struct {
+	First  *int    `json:"first,omitempty"`
+	After  *string `json:"after,omitempty"`
+	Last   *int    `json:"last,omitempty"`
+	Before *string `json:"before,omitempty"`
+}
+
 type Query struct {
+}
+
+type SendEmailInput struct {
+	ClientID     *string  `json:"clientId,omitempty"`
+	To           []string `json:"to"`
+	Cc           []string `json:"cc,omitempty"`
+	Bcc          []string `json:"bcc,omitempty"`
+	Subject      *string  `json:"subject,omitempty"`
+	BodyHTML     *string  `json:"bodyHtml,omitempty"`
+	BodyText     *string  `json:"bodyText,omitempty"`
+	TemplateID   *string  `json:"templateId,omitempty"`
+	TemplateData *JSON    `json:"templateData,omitempty"`
 }
 
 type Subscription struct {
 }
 
+type UpdateClientInput struct {
+	ID      string  `json:"id"`
+	Name    *string `json:"name,omitempty"`
+	Email   *string `json:"email,omitempty"`
+	Company *string `json:"company,omitempty"`
+}
+
 type UpdateEmailTemplateInput struct {
+	ID      string  `json:"id"`
 	Name    *string `json:"name,omitempty"`
 	Subject *string `json:"subject,omitempty"`
 	Body    *string `json:"body,omitempty"`
-}
-
-type UpdateReminderInput struct {
-	Content   *string `json:"content,omitempty"`
-	RemindAt  *Time   `json:"remindAt,omitempty"`
-	Triggered *bool   `json:"triggered,omitempty"`
-}
-
-type UpdateTaskInput struct {
-	Title       *string `json:"title,omitempty"`
-	Description *string `json:"description,omitempty"`
-	AssignedTo  *string `json:"assignedTo,omitempty"`
-	DueDate     *Time   `json:"dueDate,omitempty"`
-	Completed   *bool   `json:"completed,omitempty"`
-	ClientID    *string `json:"clientId,omitempty"`
 }

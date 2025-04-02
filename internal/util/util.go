@@ -107,3 +107,8 @@ func DecodeBase64String(encoded string) (string, error) {
 	}
 	return string(data), nil
 }
+
+// Helper function to convert string to *string
+func StringPtr(s string) *string {
+	return &s
+}

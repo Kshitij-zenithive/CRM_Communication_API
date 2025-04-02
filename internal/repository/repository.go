@@ -242,8 +242,6 @@
 
 // // --- Implementations for other repositories go here ---
 
-
-
 // internal/repository/repository.go
 package repository
 
@@ -251,6 +249,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
+
 	// "time"
 
 	dbmodel "crm-communication-api/internal/model" // Alias for database models
@@ -276,13 +276,14 @@ type AuthRepository interface {
 	DeleteRefreshToken(ctx context.Context, id uuid.UUID) error // Changed param to ID
 	GetOAuthProvider(ctx context.Context, userID uuid.UUID, provider string) (*dbmodel.OAuthProvider, error)
 	CreateOrUpdateOAuthProvider(ctx context.Context, provider *dbmodel.OAuthProvider) error // Upsert logic
+	DeleteExpiredRefreshTokens(ctx context.Context) error
 }
 
 // ConversationRepository defines methods for conversation data access.
 type ConversationRepository interface {
 	CreateConversation(ctx context.Context, conversation *dbmodel.Conversation) error
 	CreateConversationParticipant(ctx context.Context, participant *dbmodel.ConversationParticipant) error
-	GetConversationByID(ctx context.Context, id uuid.UUID) (*dbmodel.Conversation, error)            // Preloads Participants.User and Client
+	GetConversationByID(ctx context.Context, id uuid.UUID) (*dbmodel.Conversation, error)         // Preloads Participants.User and Client
 	GetConversationsByUser(ctx context.Context, userID uuid.UUID) ([]dbmodel.Conversation, error) // Preloads Participants.User and Client
 	DeleteConversation(ctx context.Context, id uuid.UUID) error
 	GetConversationParticipants(ctx context.Context, conversationID uuid.UUID) ([]dbmodel.ConversationParticipant, error) // Preloads User
@@ -292,18 +293,20 @@ type ConversationRepository interface {
 // MessageRepository defines methods for message data access.
 type MessageRepository interface {
 	CreateMessage(ctx context.Context, message *dbmodel.Message) error
-	GetMessageByID(ctx context.Context, id uuid.UUID) (*dbmodel.Message, error)                                        // Preloads Sender and Conversation
-	GetMessagesByConversationID(ctx context.Context, conversationID uuid.UUID /*, limit, offset */) ([]dbmodel.Message, error) // Preloads Sender
-	// GetMessageMentions is removed as the model was removed
+	GetMessageByID(ctx context.Context, id uuid.UUID) (*dbmodel.Message, error)
+	GetMessagesByConversationID(ctx context.Context, conversationID uuid.UUID /*, limit, offset */) ([]dbmodel.Message, error)
 	GetMessageReadBy(ctx context.Context, messageID uuid.UUID) ([]dbmodel.User, error) // Gets users who read the message
+	// ADD THESE TWO METHODS:
+	GetMessageReadReceipt(ctx context.Context, messageID, userID uuid.UUID) (*dbmodel.MessageReadReceipt, error) // Check if a specific user read it
+	CreateMessageReadReceipt(ctx context.Context, receipt *dbmodel.MessageReadReceipt) error                     // Create a read receipt
 }
 
 // EmailRepository defines methods for email data access.
 type EmailRepository interface {
 	CreateEmail(ctx context.Context, email *dbmodel.Email) error
-	GetEmailByID(ctx context.Context, id uuid.UUID) (*dbmodel.Email, error)                // Preloads Client, User, Attachments
-	GetEmailsByClientID(ctx context.Context, clientID uuid.UUID) ([]dbmodel.Email, error)   // Preloads Client, User
-	GetEmailsByUserID(ctx context.Context, userID uuid.UUID) ([]dbmodel.Email, error)       // Preloads Client, User
+	GetEmailByID(ctx context.Context, id uuid.UUID) (*dbmodel.Email, error)                        // Preloads Client, User, Attachments
+	GetEmailsByClientID(ctx context.Context, clientID uuid.UUID) ([]dbmodel.Email, error)          // Preloads Client, User
+	GetEmailsByUserID(ctx context.Context, userID uuid.UUID) ([]dbmodel.Email, error)              // Preloads Client, User
 	GetEmailByProviderID(ctx context.Context, provider, providerID string) (*dbmodel.Email, error) // For sync checks
 	CreateEmailAttachment(ctx context.Context, attachment *dbmodel.EmailAttachment) error
 }
@@ -334,7 +337,6 @@ type TimelineRepository interface {
 	GetTimelineEvents(ctx context.Context, clientID *uuid.UUID, userID *uuid.UUID /*, limit, offset */) ([]dbmodel.TimelineEvent, error) // Preloads User, Client
 }
 
-
 // --- Main Repository ---
 
 // Repository holds the database connection and implements all repository interfaces.
@@ -344,13 +346,13 @@ type Repository struct {
 }
 
 // Assert that Repository implements all interfaces
-var _ AuthRepository         = (*Repository)(nil)
+var _ AuthRepository = (*Repository)(nil)
 var _ ConversationRepository = (*Repository)(nil)
-var _ MessageRepository      = (*Repository)(nil)
-var _ EmailRepository        = (*Repository)(nil)
-var _ ClientRepository       = (*Repository)(nil)
-var _ TemplateRepository     = (*Repository)(nil)
-var _ TimelineRepository     = (*Repository)(nil)
+var _ MessageRepository = (*Repository)(nil)
+var _ EmailRepository = (*Repository)(nil)
+var _ ClientRepository = (*Repository)(nil)
+var _ TemplateRepository = (*Repository)(nil)
+var _ TimelineRepository = (*Repository)(nil)
 
 // NewRepository creates a new Repository instance.
 func NewRepository(db *gorm.DB) *Repository {
@@ -363,7 +365,9 @@ func (r *Repository) GetUserByEmail(ctx context.Context, email string) (*dbmodel
 	var user dbmodel.User
 	err := r.db.WithContext(ctx).Where("email = ?", email).First(&user).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("failed to get user by email: %w", err)
 	}
 	return &user, nil
@@ -372,25 +376,45 @@ func (r *Repository) GetUserByID(ctx context.Context, id uuid.UUID) (*dbmodel.Us
 	var user dbmodel.User
 	err := r.db.WithContext(ctx).Where("id = ?", id).First(&user).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("failed to get user by id: %w", err)
 	}
 	return &user, nil
 }
 func (r *Repository) CreateUser(ctx context.Context, user *dbmodel.User) error {
 	err := r.db.WithContext(ctx).Create(user).Error
-	if err != nil { return fmt.Errorf("failed to create user: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to create user: %w", err)
+	}
 	return nil
 }
 func (r *Repository) UpdateUser(ctx context.Context, user *dbmodel.User) error {
-	if user.ID == uuid.Nil { return fmt.Errorf("cannot update user with nil ID") }
+	if user.ID == uuid.Nil {
+		return fmt.Errorf("cannot update user with nil ID")
+	}
 	err := r.db.WithContext(ctx).Save(user).Error
-	if err != nil { return fmt.Errorf("failed to update user: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to update user: %w", err)
+	}
 	return nil
+}
+
+// GetAllUsers retrieves all users (consider pagination for production).
+func (r *Repository) GetAllUsers(ctx context.Context) ([]dbmodel.User, error) {
+	var users []dbmodel.User
+	err := r.db.WithContext(ctx).Find(&users).Error // Simple find all for now
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all users: %w", err)
+	}
+	return users, nil
 }
 func (r *Repository) CreateRefreshToken(ctx context.Context, token *dbmodel.RefreshToken) error {
 	err := r.db.WithContext(ctx).Create(token).Error
-	if err != nil { return fmt.Errorf("failed to create refresh token: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to create refresh token: %w", err)
+	}
 	return nil
 }
 func (r *Repository) FindRefreshToken(ctx context.Context, tokenString string) (*dbmodel.RefreshToken, error) {
@@ -398,14 +422,18 @@ func (r *Repository) FindRefreshToken(ctx context.Context, tokenString string) (
 	// Expiry check moved to service layer for clarity, repo just finds the token
 	err := r.db.WithContext(ctx).Where("token = ?", tokenString).First(&token).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("failed to find refresh token: %w", err)
 	}
 	return &token, nil
 }
 func (r *Repository) DeleteRefreshToken(ctx context.Context, id uuid.UUID) error {
 	result := r.db.WithContext(ctx).Delete(&dbmodel.RefreshToken{}, id)
-	if result.Error != nil { return fmt.Errorf("failed to delete refresh token: %w", result.Error) }
+	if result.Error != nil {
+		return fmt.Errorf("failed to delete refresh token: %w", result.Error)
+	}
 	// Optional: Check result.RowsAffected == 0 and return ErrNotFound if needed
 	return nil
 }
@@ -413,7 +441,9 @@ func (r *Repository) GetOAuthProvider(ctx context.Context, userID uuid.UUID, pro
 	var providerInfo dbmodel.OAuthProvider
 	err := r.db.WithContext(ctx).Where("user_id = ? AND provider = ?", userID, provider).First(&providerInfo).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("failed to get oauth provider: %w", err)
 	}
 	return &providerInfo, nil
@@ -432,11 +462,30 @@ func (r *Repository) CreateOrUpdateOAuthProvider(ctx context.Context, provider *
 	return nil
 }
 
+// DeleteExpiredRefreshTokens removes refresh tokens that have passed their expiry time.
+func (r *Repository) DeleteExpiredRefreshTokens(ctx context.Context) error {
+	now := time.Now()
+	result := r.db.WithContext(ctx).
+		Where("expires_at < ?", now).
+		Delete(&dbmodel.RefreshToken{}) // Delete based on the model type and condition
+
+	if result.Error != nil {
+		// Log error if logger is available
+		// r.logger.ErrorContext(ctx, "Database error deleting expired refresh tokens", slog.String("error", result.Error.Error()))
+		return fmt.Errorf("failed to delete expired refresh tokens: %w", result.Error)
+	}
+	// Log number of deleted tokens if logger is available
+	// r.logger.InfoContext(ctx, "Expired refresh token cleanup complete", slog.Int64("deleted_count", result.RowsAffected))
+	return nil
+}
+
 // --- ConversationRepository Implementation ---
 
 func (r *Repository) CreateConversation(ctx context.Context, conversation *dbmodel.Conversation) error {
 	err := r.db.WithContext(ctx).Create(conversation).Error
-	if err != nil { return fmt.Errorf("failed to create conversation: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to create conversation: %w", err)
+	}
 	return nil
 }
 
@@ -448,7 +497,9 @@ func (r *Repository) CreateConversationParticipant(ctx context.Context, particip
 		// Or use DoUpdates if you want to update 'joined_at' or other fields on re-add
 		// DoUpdates: clause.AssignmentColumns([]string{"updated_at"}),
 	}).Create(participant).Error
-	if err != nil { return fmt.Errorf("failed to create conversation participant: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to create conversation participant: %w", err)
+	}
 	return nil
 }
 
@@ -460,7 +511,9 @@ func (r *Repository) GetConversationByID(ctx context.Context, id uuid.UUID) (*db
 		Where("id = ?", id).
 		First(&conversation).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("failed to get conversation by id: %w", err)
 	}
 	return &conversation, nil
@@ -560,7 +613,9 @@ func (r *Repository) RemoveConversationParticipant(ctx context.Context, conversa
 
 func (r *Repository) CreateMessage(ctx context.Context, message *dbmodel.Message) error {
 	err := r.db.WithContext(ctx).Create(message).Error
-	if err != nil { return fmt.Errorf("failed to create message: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to create message: %w", err)
+	}
 	// Need to update Conversation's UpdatedAt? GORM might handle this with association hooks,
 	// or do it manually here or in the service.
 	// r.db.Model(&dbmodel.Conversation{}).Where("id = ?", message.ConversationID).Update("updated_at", time.Now())
@@ -574,7 +629,9 @@ func (r *Repository) GetMessageByID(ctx context.Context, id uuid.UUID) (*dbmodel
 		Preload("Conversation").
 		First(&message, id).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("failed to get message by id: %w", err)
 	}
 	return &message, nil
@@ -600,34 +657,65 @@ func (r *Repository) GetMessagesByConversationID(ctx context.Context, conversati
 
 // GetMessageReadBy retrieves users who have read a specific message.
 func (r *Repository) GetMessageReadBy(ctx context.Context, messageID uuid.UUID) ([]dbmodel.User, error) {
-    var users []dbmodel.User
-    // Find user IDs from the receipts table
-    var readReceipts []dbmodel.MessageReadReceipt
-    if err := r.db.WithContext(ctx).Where("message_id = ?", messageID).Find(&readReceipts).Error; err != nil {
-        return nil, fmt.Errorf("failed to get read receipts for message %s: %w", messageID, err)
-    }
-    if len(readReceipts) == 0 {
-        return []dbmodel.User{}, nil // No one read it yet
-    }
+	var users []dbmodel.User
+	// Find user IDs from the receipts table
+	var readReceipts []dbmodel.MessageReadReceipt
+	if err := r.db.WithContext(ctx).Where("message_id = ?", messageID).Find(&readReceipts).Error; err != nil {
+		return nil, fmt.Errorf("failed to get read receipts for message %s: %w", messageID, err)
+	}
+	if len(readReceipts) == 0 {
+		return []dbmodel.User{}, nil // No one read it yet
+	}
 
-    userIDs := make([]uuid.UUID, len(readReceipts))
-    for i, receipt := range readReceipts {
-        userIDs[i] = receipt.UserID
-    }
+	userIDs := make([]uuid.UUID, len(readReceipts))
+	for i, receipt := range readReceipts {
+		userIDs[i] = receipt.UserID
+	}
 
-    // Fetch user details for those IDs
-    if err := r.db.WithContext(ctx).Where("id IN ?", userIDs).Find(&users).Error; err != nil {
-        return nil, fmt.Errorf("failed to get users who read message %s: %w", messageID, err)
-    }
-    return users, nil
+	// Fetch user details for those IDs
+	if err := r.db.WithContext(ctx).Where("id IN ?", userIDs).Find(&users).Error; err != nil {
+		return nil, fmt.Errorf("failed to get users who read message %s: %w", messageID, err)
+	}
+	return users, nil
 }
 
+// GetMessageReadReceipt checks if a specific user has read a specific message.
+func (r *Repository) GetMessageReadReceipt(ctx context.Context, messageID, userID uuid.UUID) (*dbmodel.MessageReadReceipt, error) {
+	var receipt dbmodel.MessageReadReceipt
+	err := r.db.WithContext(ctx).
+		Where("message_id = ? AND user_id = ?", messageID, userID).
+		First(&receipt).Error // Use First to get a single record or ErrRecordNotFound
+
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound // Return custom not found error
+		}
+		return nil, fmt.Errorf("failed to get message read receipt: %w", err)
+	}
+	return &receipt, nil
+}
+
+// CreateMessageReadReceipt creates a record indicating a user has read a message.
+func (r *Repository) CreateMessageReadReceipt(ctx context.Context, receipt *dbmodel.MessageReadReceipt) error {
+	// Use OnConflict to avoid errors if the receipt somehow already exists (makes it idempotent)
+	err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "message_id"}, {Name: "user_id"}}, // Composite primary key
+		DoNothing: true,                                                     // If it exists, do nothing
+	}).Create(receipt).Error
+
+	if err != nil {
+		return fmt.Errorf("failed to create message read receipt: %w", err)
+	}
+	return nil
+}
 
 // --- EmailRepository Implementation ---
 
 func (r *Repository) CreateEmail(ctx context.Context, email *dbmodel.Email) error {
 	err := r.db.WithContext(ctx).Create(email).Error
-	if err != nil { return fmt.Errorf("failed to create email: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to create email: %w", err)
+	}
 	return nil
 }
 
@@ -639,7 +727,9 @@ func (r *Repository) GetEmailByID(ctx context.Context, id uuid.UUID) (*dbmodel.E
 		Preload("Attachments").
 		First(&email, id).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("failed to get email by id: %w", err)
 	}
 	return &email, nil
@@ -653,7 +743,9 @@ func (r *Repository) GetEmailsByClientID(ctx context.Context, clientID uuid.UUID
 		Where("client_id = ?", clientID).
 		Order("created_at DESC"). // Or received_at/sent_at
 		Find(&emails).Error
-	if err != nil { return nil, fmt.Errorf("failed to get emails by client id: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("failed to get emails by client id: %w", err)
+	}
 	return emails, nil
 }
 
@@ -665,7 +757,9 @@ func (r *Repository) GetEmailsByUserID(ctx context.Context, userID uuid.UUID) ([
 		Where("user_id = ?", userID).
 		Order("created_at DESC").
 		Find(&emails).Error
-	if err != nil { return nil, fmt.Errorf("failed to get emails by user id: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("failed to get emails by user id: %w", err)
+	}
 	return emails, nil
 }
 
@@ -675,7 +769,9 @@ func (r *Repository) GetEmailByProviderID(ctx context.Context, provider, provide
 		Where("provider = ? AND provider_id = ?", provider, providerID).
 		First(&email).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("failed to get email by provider id: %w", err)
 	}
 	return &email, nil
@@ -683,7 +779,9 @@ func (r *Repository) GetEmailByProviderID(ctx context.Context, provider, provide
 
 func (r *Repository) CreateEmailAttachment(ctx context.Context, attachment *dbmodel.EmailAttachment) error {
 	err := r.db.WithContext(ctx).Create(attachment).Error
-	if err != nil { return fmt.Errorf("failed to create email attachment: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to create email attachment: %w", err)
+	}
 	return nil
 }
 
@@ -691,14 +789,18 @@ func (r *Repository) CreateEmailAttachment(ctx context.Context, attachment *dbmo
 
 func (r *Repository) CreateClient(ctx context.Context, client *dbmodel.Client) error {
 	err := r.db.WithContext(ctx).Create(client).Error
-	if err != nil { return fmt.Errorf("failed to create client: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to create client: %w", err)
+	}
 	return nil
 }
 func (r *Repository) GetClientByID(ctx context.Context, id uuid.UUID) (*dbmodel.Client, error) {
 	var client dbmodel.Client
 	err := r.db.WithContext(ctx).First(&client, id).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("failed to get client by id: %w", err)
 	}
 	return &client, nil
@@ -707,7 +809,9 @@ func (r *Repository) GetClientByEmail(ctx context.Context, email string) (*dbmod
 	var client dbmodel.Client
 	err := r.db.WithContext(ctx).Where("email = ?", email).First(&client).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("failed to get client by email: %w", err)
 	}
 	return &client, nil
@@ -715,13 +819,19 @@ func (r *Repository) GetClientByEmail(ctx context.Context, email string) (*dbmod
 func (r *Repository) GetAllClients(ctx context.Context) ([]dbmodel.Client, error) {
 	var clients []dbmodel.Client
 	err := r.db.WithContext(ctx).Order("name ASC").Find(&clients).Error
-	if err != nil { return nil, fmt.Errorf("failed to get all clients: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all clients: %w", err)
+	}
 	return clients, nil
 }
 func (r *Repository) UpdateClient(ctx context.Context, client *dbmodel.Client) error {
-	if client.ID == uuid.Nil { return fmt.Errorf("cannot update client with nil ID") }
+	if client.ID == uuid.Nil {
+		return fmt.Errorf("cannot update client with nil ID")
+	}
 	err := r.db.WithContext(ctx).Save(client).Error
-	if err != nil { return fmt.Errorf("failed to update client: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to update client: %w", err)
+	}
 	return nil
 }
 
@@ -729,7 +839,9 @@ func (r *Repository) UpdateClient(ctx context.Context, client *dbmodel.Client) e
 
 func (r *Repository) CreateEmailTemplate(ctx context.Context, template *dbmodel.EmailTemplate) error {
 	err := r.db.WithContext(ctx).Create(template).Error
-	if err != nil { return fmt.Errorf("failed to create email template: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to create email template: %w", err)
+	}
 	return nil
 }
 
@@ -737,7 +849,9 @@ func (r *Repository) GetEmailTemplateByID(ctx context.Context, id uuid.UUID) (*d
 	var template dbmodel.EmailTemplate
 	err := r.db.WithContext(ctx).First(&template, id).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("failed to get email template by id: %w", err)
 	}
 	return &template, nil
@@ -747,7 +861,9 @@ func (r *Repository) GetEmailTemplateByName(ctx context.Context, name string) (*
 	var template dbmodel.EmailTemplate
 	err := r.db.WithContext(ctx).Where("name = ?", name).First(&template).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("failed to get email template by name: %w", err)
 	}
 	return &template, nil
@@ -756,21 +872,31 @@ func (r *Repository) GetEmailTemplateByName(ctx context.Context, name string) (*
 func (r *Repository) GetAllEmailTemplates(ctx context.Context) ([]dbmodel.EmailTemplate, error) {
 	var templates []dbmodel.EmailTemplate
 	err := r.db.WithContext(ctx).Order("name ASC").Find(&templates).Error
-	if err != nil { return nil, fmt.Errorf("failed to get all email templates: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all email templates: %w", err)
+	}
 	return templates, nil
 }
 
 func (r *Repository) UpdateEmailTemplate(ctx context.Context, template *dbmodel.EmailTemplate) error {
-	if template.ID == uuid.Nil { return fmt.Errorf("cannot update email template with nil ID") }
+	if template.ID == uuid.Nil {
+		return fmt.Errorf("cannot update email template with nil ID")
+	}
 	err := r.db.WithContext(ctx).Save(template).Error
-	if err != nil { return fmt.Errorf("failed to update email template: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to update email template: %w", err)
+	}
 	return nil
 }
 
 func (r *Repository) DeleteEmailTemplate(ctx context.Context, id uuid.UUID) error {
 	result := r.db.WithContext(ctx).Delete(&dbmodel.EmailTemplate{}, id)
-	if result.Error != nil { return fmt.Errorf("failed to delete email template: %w", result.Error) }
-	if result.RowsAffected == 0 { return ErrNotFound }
+	if result.Error != nil {
+		return fmt.Errorf("failed to delete email template: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
 	return nil
 }
 
@@ -778,7 +904,9 @@ func (r *Repository) DeleteEmailTemplate(ctx context.Context, id uuid.UUID) erro
 
 func (r *Repository) CreateTimelineEvent(ctx context.Context, event *dbmodel.TimelineEvent) error {
 	err := r.db.WithContext(ctx).Create(event).Error
-	if err != nil { return fmt.Errorf("failed to create timeline event: %w", err) }
+	if err != nil {
+		return fmt.Errorf("failed to create timeline event: %w", err)
+	}
 	return nil
 }
 
@@ -798,6 +926,8 @@ func (r *Repository) GetTimelineEvents(ctx context.Context, clientID *uuid.UUID,
 	// if offset > 0 { query = query.Offset(offset) }
 
 	err := query.Order("event_time DESC").Find(&events).Error // Order by event time, descending
-	if err != nil { return nil, fmt.Errorf("failed to get timeline events: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("failed to get timeline events: %w", err)
+	}
 	return events, nil
 }

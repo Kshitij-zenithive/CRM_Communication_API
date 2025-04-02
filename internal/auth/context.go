@@ -3,80 +3,80 @@ package auth
 
 import (
 	"context"
-	dbmodel "crm-communication-api/internal/model" // Use alias if needed
+	// dbmodel "crm-communication-api/internal/model"
 	"fmt"
 
 	"github.com/google/uuid"
 )
 
-// contextKey defines a type for context keys to avoid collisions.
 type contextKey string
 
 const (
-	// userContextKey is the key for storing/retrieving the User object in context.
-	userContextKey contextKey = "user"
-	// claimsContextKey is the key for storing/retrieving JWT Claims in context.
-	claimsContextKey contextKey = "claims"
+	// UserContextKey is for storing/retrieving the full User dbmodel object (less common).
+	// UserContextKey contextKey = "user"
+	// ClaimsContextKey is the key for storing/retrieving JWT Claims in context. Exported for middleware use.
+	ClaimsContextKey contextKey = "claims" // CORRECTED: Exported (Capitalized)
 )
 
-// ContextSetUser adds the User object to the context.
-func ContextSetUser(ctx context.Context, user *dbmodel.User) context.Context {
-	return context.WithValue(ctx, userContextKey, user)
-}
+var (
+	ErrUserNotInContext = fmt.Errorf("user claims not found in context")
+)
 
-// ContextGetUser retrieves the User object from the context.
-// Returns the User and true if found, otherwise nil and false.
-func ContextGetUser(ctx context.Context) (*dbmodel.User, bool) {
-	user, ok := ctx.Value(userContextKey).(*dbmodel.User)
-	return user, ok
-}
-
-// ContextRequireUser retrieves the User object from the context.
-// Panics if the user is not found - use only when user presence is guaranteed (e.g., after auth middleware).
-func ContextRequireUser(ctx context.Context) *dbmodel.User {
-	user, ok := ContextGetUser(ctx)
-	if !ok {
-		// This indicates a programming error - auth middleware should have added the user.
-		panic("auth: user not found in context where required")
-	}
-	return user
-}
-
-
-// ContextSetClaims adds the JWT Claims object to the context.
+// ContextSetClaims adds the JWT Claims object to the context using the exported key.
 func ContextSetClaims(ctx context.Context, claims *Claims) context.Context {
-	return context.WithValue(ctx, claimsContextKey, claims)
+	return context.WithValue(ctx, ClaimsContextKey, claims) // Use exported key
 }
 
-// ContextGetClaims retrieves the JWT Claims object from the context.
-// Returns the Claims and true if found, otherwise nil and false.
+// ContextGetClaims retrieves the JWT Claims object from the context using the exported key.
 func ContextGetClaims(ctx context.Context) (*Claims, bool) {
-	claims, ok := ctx.Value(claimsContextKey).(*Claims)
+	claims, ok := ctx.Value(ClaimsContextKey).(*Claims) // Use exported key
 	return claims, ok
 }
 
-// ContextRequireClaims retrieves the Claims object from the context.
-// Panics if claims are not found - use only when claims presence is guaranteed.
+// ContextRequireClaims retrieves the Claims object from the context. Panics if not found.
 func ContextRequireClaims(ctx context.Context) *Claims {
-    claims, ok := ContextGetClaims(ctx)
-    if !ok {
-        panic("auth: claims not found in context where required")
-    }
-    return claims
+	claims, ok := ContextGetClaims(ctx)
+	if !ok {
+		panic("auth: claims not found in context where required")
+	}
+	return claims
 }
 
 // ContextGetUserID retrieves the user ID (as UUID) from the context's claims.
-// Returns the UUID and true if found and valid, otherwise zero UUID and false.
 func ContextGetUserID(ctx context.Context) (uuid.UUID, bool) {
-	claims, ok := ContextGetClaims(ctx)
+	claims, ok := ContextGetClaims(ctx) // This function now correctly uses the exported key internally
 	if !ok || claims.Subject == "" {
 		return uuid.Nil, false
 	}
 	userID, err := uuid.Parse(claims.Subject)
 	if err != nil {
-		// Log this? It implies Subject in a valid token wasn't a UUID.
 		fmt.Printf("Error parsing userID from context claims: %v\n", err) // Replace with logger
 		return uuid.Nil, false
 	}
 	return userID, true
 }
+
+// --- User object context functions (Keep if needed, but claims are usually sufficient) ---
+
+/*
+// ContextSetUser adds the User object to the context.
+func ContextSetUser(ctx context.Context, user *dbmodel.User) context.Context {
+	// If using this, define and export UserContextKey = "user"
+	return context.WithValue(ctx, UserContextKey, user)
+}
+
+// ContextGetUser retrieves the User object from the context.
+func ContextGetUser(ctx context.Context) (*dbmodel.User, bool) {
+	user, ok := ctx.Value(UserContextKey).(*dbmodel.User)
+	return user, ok
+}
+
+// ContextRequireUser retrieves the User object from the context. Panics if not found.
+func ContextRequireUser(ctx context.Context) *dbmodel.User {
+	user, ok := ContextGetUser(ctx)
+	if !ok {
+		panic("auth: user not found in context where required")
+	}
+	return user
+}
+*/
